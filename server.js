@@ -11,37 +11,40 @@ app.use(express.json());
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
-        user: process.env.EMAIL_USER, // Aapka Gmail
-        pass: process.env.EMAIL_PASS  // Aapka App Password
+        user: process.env.EMAIL_USER, // Aapka Gmail (supporthealthjobs@gmail.com)
+        pass: process.env.EMAIL_PASS  // Aapka 16-digit App Password
     }
 });
 
-// Professional Email Template Generator
+// Professional Email Template Generator (Background Removed from Logo)
 const signupTemplate = (userName) => {
     return `
-    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e0dfdc; border-radius: 12px; overflow: hidden; background-color: #ffffff;">
-        <div style="background-color: #000; padding: 20px; text-align: center;">
-            <img src="https://healthjobs-portal.web.app/images/logo.png" alt="Health Jobs Portal" style="height: 50px;">
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e0dfdc; border-radius: 12px; overflow: hidden; background-color: #ffffff; box-shadow: 0 4px 15px rgba(0,0,0,0.05);">
+        
+        <div style="padding: 40px 20px 10px; text-align: center;">
+            <img src="https://healthjobs-portal.web.app/images/logo-icon.png" alt="Health Jobs Portal" style="height: 80px; width: auto; display: block; margin: 0 auto;">
         </div>
-        <div style="padding: 30px; color: #333;">
-            <h2 style="color: #0a66c2; margin-bottom: 20px;">Welcome to the Network, ${userName}!</h2>
-            <p style="font-size: 16px; line-height: 1.6;">Your journey in healthcare career excellence starts here. We are thrilled to have you on board <b>Health Jobs Portal</b>.</p>
+        
+        <div style="padding: 20px 30px 35px; color: #333;">
+            <h2 style="color: #0a66c2; margin-bottom: 20px; font-size: 22px; text-align: center;">Welcome to the Network, ${userName}!</h2>
+            <p style="font-size: 16px; line-height: 1.6; color: #475569;">Your journey in healthcare career excellence starts here. We are thrilled to have you on board <b>Health Jobs Portal</b>.</p>
             
-            <div style="background: #f3f8fe; border-left: 4px solid #0a66c2; padding: 15px; margin: 20px 0;">
-                <p style="margin: 0; font-size: 14px; color: #555;">You can now post job requirements, find medical staff, and connect with healthcare professionals near you.</p>
+            <div style="background: #f0f7ff; border-left: 4px solid #0a66c2; padding: 18px; margin: 25px 0; border-radius: 0 8px 8px 0;">
+                <p style="margin: 0; font-size: 14.5px; color: #334155; line-height: 1.5;">You can now post job requirements, find medical staff, and seamlessly connect with top healthcare professionals in your city.</p>
             </div>
 
-            <p style="font-size: 16px;">Ready to explore? Click the button below to complete your profile.</p>
+            <p style="font-size: 16px; color: #475569;">Ready to explore? Click the button below to access your professional dashboard.</p>
             
-            <div style="text-align: center; margin: 30px 0;">
-                <a href="https://healthjobs-portal.web.app/profile.html" style="background-color: #0a66c2; color: white; padding: 14px 25px; text-decoration: none; border-radius: 25px; font-weight: bold; font-size: 16px; display: inline-block; box-shadow: 0 4px 6px rgba(10,102,194,0.2);">Explore Your Dashboard</a>
+            <div style="text-align: center; margin: 35px 0;">
+                <a href="https://healthjobs-portal.web.app/index.html" style="background-color: #0a66c2; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 30px; font-weight: 600; font-size: 16px; display: inline-block; box-shadow: 0 4px 10px rgba(10,102,194,0.3);">Explore Your Dashboard</a>
             </div>
 
-            <p style="font-size: 14px; color: #666;">If you have any questions, feel free to reply to this email. Our support team is always here to help.</p>
+            <p style="font-size: 14px; color: #64748b; margin-top: 30px; border-top: 1px solid #e2e8f0; padding-top: 20px;">If you have any questions, feel free to reply directly to this email. Our support team is always here to help.</p>
         </div>
-        <div style="background-color: #f9fafb; padding: 20px; text-align: center; border-top: 1px solid #eee;">
-            <p style="font-size: 12px; color: #999; margin: 0;">&copy; 2026 Health Jobs Portal | Your Career in Healthcare</p>
-            <p style="font-size: 12px; color: #999; margin-top: 5px;">Pakistan's Leading Healthcare Professional Network</p>
+        
+        <div style="background-color: #f8fafc; padding: 20px; text-align: center; border-top: 1px solid #e2e8f0;">
+            <p style="font-size: 12px; color: #94a3b8; margin: 0; font-weight: 600;">&copy; 2026 Health Jobs Portal | Your Career in Healthcare</p>
+            <p style="font-size: 12px; color: #94a3b8; margin-top: 6px;">Pakistan's Leading Healthcare Professional Network</p>
         </div>
     </div>
     `;
@@ -56,7 +59,7 @@ app.post('/api/send-welcome', async (req, res) => {
     }
 
     const mailOptions = {
-        from: '"Health Jobs Portal" <' + process.env.EMAIL_USER + '>',
+        from: '"Health Jobs Support" <' + process.env.EMAIL_USER + '>',
         to: email,
         subject: 'Welcome to Health Jobs Portal - Professional Network',
         html: signupTemplate(name)
@@ -71,11 +74,16 @@ app.post('/api/send-welcome', async (req, res) => {
     }
 });
 
+// Basic Route to check if server is running
+app.get('/', (req, res) => {
+    res.send('Health Jobs Mail Server is Running Perfectly!');
+});
+
 // Vercel Support
 module.exports = app;
 
 // For Local Testing
 if (process.env.NODE_ENV !== 'production') {
-    const PORT = 3000;
+    const PORT = process.env.PORT || 3000;
     app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
 }
