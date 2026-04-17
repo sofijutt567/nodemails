@@ -1,20 +1,10 @@
-const express = require('express');
-const nodemailer = require('nodemailer');
+  const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// Nodemailer Transporter Setup
-const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-        user: process.env.EMAIL_USER, // Aapka Gmail (supporthealthjobs@gmail.com)
-        pass: process.env.EMAIL_PASS  // Aapka 16-digit App Password
-    }
-});
 
 // Professional Email Template Generator (Background Removed from Logo)
 const signupTemplate = (userName) => {
@@ -50,7 +40,7 @@ const signupTemplate = (userName) => {
     `;
 };
 
-// API Endpoint for Signup Email
+// API Endpoint for Signup Email using Brevo API
 app.post('/api/send-welcome', async (req, res) => {
     const { email, name } = req.body;
 
@@ -58,25 +48,47 @@ app.post('/api/send-welcome', async (req, res) => {
         return res.status(400).json({ success: false, error: "Missing email or name" });
     }
 
-    const mailOptions = {
-        from: '"Health Jobs Support" <' + process.env.EMAIL_USER + '>',
-        to: email,
-        subject: 'Welcome to Health Jobs Portal - Professional Network',
-        html: signupTemplate(name)
+    const brevoApiKey = process.env.BREVO_API_KEY; // Aapki Brevo ki API Key
+    const senderEmail = process.env.SENDER_EMAIL;  // Aapka verified email (e.g., supporthealthjobs@gmail.com)
+
+    // Brevo API ka payload format
+    const emailData = {
+        sender: { name: "Health Jobs Support", email: senderEmail },
+        to: [{ email: email, name: name }],
+        subject: "Welcome to Health Jobs Portal - Professional Network",
+        htmlContent: signupTemplate(name)
     };
 
     try {
-        await transporter.sendMail(mailOptions);
-        res.status(200).json({ success: true, message: "Welcome email sent!" });
+        // Direct API call to Brevo (No Nodemailer needed)
+        const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+            method: 'POST',
+            headers: {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'api-key': brevoApiKey
+            },
+            body: JSON.stringify(emailData)
+        });
+
+        const data = await response.json();
+
+        if (response.ok) {
+            console.log("Email sent successfully via Brevo:", data.messageId);
+            res.status(200).json({ success: true, message: "Welcome email sent instantly via Brevo!" });
+        } else {
+            console.error("Brevo API Error:", data);
+            res.status(500).json({ success: false, error: data.message });
+        }
     } catch (error) {
-        console.error("Mail Error:", error);
+        console.error("Server Error during fetch:", error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
 
 // Basic Route to check if server is running
 app.get('/', (req, res) => {
-    res.send('Health Jobs Mail Server is Running Perfectly!');
+    res.send('Health Jobs Mail Server is Running Perfectly via Brevo API!');
 });
 
 // Vercel Support
