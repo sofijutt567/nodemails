@@ -12,7 +12,7 @@ const signupTemplate = (userName) => {
     <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e0dfdc; border-radius: 12px; overflow: hidden; background-color: #ffffff; box-shadow: 0 4px 15px rgba(0,0,0,0.05);">
         
         <div style="padding: 40px 20px 10px; text-align: center;">
-            <img src="https://healthjobs-portal.web.app/images/logo-icon.png" alt="Health Jobs Portal" style="height: 80px; width: auto; display: block; margin: 0 auto;">
+            <img src="https://healthjobs-portal.web.app/images/favicon.png" alt="Health Jobs Portal" style="height: 80px; width: auto; display: block; margin: 0 auto;">
         </div>
         
         <div style="padding: 20px 30px 35px; color: #333;">
