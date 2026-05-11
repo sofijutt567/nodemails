@@ -148,7 +148,7 @@ return `
             margin: 0;
             font-weight: bold;
         ">
-            © 2026 Health Jobs Portal
+            © 2026 Health Jobs Portal|Powered by sufianX 
         </p>
 
         <p style="
