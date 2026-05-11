@@ -18,7 +18,7 @@ return `
     <!-- Header -->
     <div style="text-align: center; padding: 35px 20px 15px;">
         <img 
-            src="https://healthjobs-portal.web.app/images/favicon.png" 
+            src="https://healthjobs-portal.web.app/images/banner.png" 
             alt="Health Jobs Portal"
             style="height: 75px;"
         >
