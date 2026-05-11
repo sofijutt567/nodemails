@@ -1,101 +1,288 @@
-  const express = require('express');
+const express = require('express');
 const cors = require('cors');
 require('dotenv').config();
 
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
-// Professional Email Template Generator (Background Removed from Logo)
+/* =========================================
+PROFESSIONAL EMAIL TEMPLATE
+========================================= */
+
 const signupTemplate = (userName) => {
-    return `
-    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: auto; border: 1px solid #e0dfdc; border-radius: 12px; overflow: hidden; background-color: #ffffff; box-shadow: 0 4px 15px rgba(0,0,0,0.05);">
-        
-        <div style="padding: 40px 20px 10px; text-align: center;">
-            <img src="https://healthjobs-portal.web.app/images/favicon.png" alt="Health Jobs Portal" style="height: 80px; width: auto; display: block; margin: 0 auto;">
-        </div>
-        
-        <div style="padding: 20px 30px 35px; color: #333;">
-            <h2 style="color: #0a66c2; margin-bottom: 20px; font-size: 22px; text-align: center;">Welcome to the Network, ${userName}!</h2>
-            <p style="font-size: 16px; line-height: 1.6; color: #475569;">Your journey in healthcare career excellence starts here. We are thrilled to have you on board <b>Health Jobs Portal</b>.</p>
-            
-            <div style="background: #f0f7ff; border-left: 4px solid #0a66c2; padding: 18px; margin: 25px 0; border-radius: 0 8px 8px 0;">
-                <p style="margin: 0; font-size: 14.5px; color: #334155; line-height: 1.5;">You can now post job requirements, find medical staff, and seamlessly connect with top healthcare professionals in your city.</p>
-            </div>
+return `
+<div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden;">
 
-            <p style="font-size: 16px; color: #475569;">Ready to explore? Click the button below to access your professional dashboard.</p>
-            
-            <div style="text-align: center; margin: 35px 0;">
-                <a href="https://healthjobs-portal.web.app/index.html" style="background-color: #0a66c2; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 30px; font-weight: 600; font-size: 16px; display: inline-block; box-shadow: 0 4px 10px rgba(10,102,194,0.3);">Explore Your Dashboard</a>
-            </div>
-
-            <p style="font-size: 14px; color: #64748b; margin-top: 30px; border-top: 1px solid #e2e8f0; padding-top: 20px;">If you have any questions, feel free to reply directly to this email. Our support team is always here to help.</p>
-        </div>
-        
-        <div style="background-color: #f8fafc; padding: 20px; text-align: center; border-top: 1px solid #e2e8f0;">
-            <p style="font-size: 12px; color: #94a3b8; margin: 0; font-weight: 600;">&copy; 2026 Health Jobs Portal | Your Career in Healthcare</p>
-            <p style="font-size: 12px; color: #94a3b8; margin-top: 6px;">Pakistan's Leading Healthcare Professional Network</p>
-        </div>
+    <!-- Header -->
+    <div style="text-align: center; padding: 35px 20px 15px;">
+        <img 
+            src="https://healthjobs-portal.web.app/images/favicon.png" 
+            alt="Health Jobs Portal"
+            style="height: 75px;"
+        >
     </div>
-    `;
+
+    <!-- Content -->
+    <div style="padding: 20px 35px; color: #374151;">
+
+        <h2 style="text-align: center; color: #0a66c2; margin-bottom: 18px;">
+            Welcome, ${userName}
+        </h2>
+
+        <p style="font-size: 15px; line-height: 1.8; color: #475569;">
+            Thank you for joining 
+            <b>Health Jobs Portal</b>.
+            Your professional healthcare journey starts here.
+        </p>
+
+        <div style="
+            background: #f8fafc;
+            border-left: 4px solid #0a66c2;
+            padding: 16px;
+            border-radius: 6px;
+            margin: 22px 0;
+        ">
+            <p style="
+                margin: 0;
+                font-size: 14px;
+                color: #475569;
+                line-height: 1.7;
+            ">
+                Find healthcare jobs, hire medical staff,
+                and connect with healthcare professionals
+                across Pakistan.
+            </p>
+        </div>
+
+        <!-- Button -->
+        <div style="text-align: center; margin: 30px 0;">
+            <a 
+                href="https://healthjobs-portal.web.app/index.html"
+                style="
+                    background: #0a66c2;
+                    color: white;
+                    text-decoration: none;
+                    padding: 11px 24px;
+                    border-radius: 7px;
+                    font-size: 14px;
+                    font-weight: bold;
+                    display: inline-block;
+                "
+            >
+                Open Dashboard
+            </a>
+        </div>
+
+    </div>
+
+    <!-- Footer -->
+    <div style="
+        background: #f8fafc;
+        padding: 25px 20px;
+        text-align: center;
+        border-top: 1px solid #e5e7eb;
+    ">
+
+        <p style="
+            font-size: 13px;
+            color: #64748b;
+            margin-bottom: 16px;
+        ">
+            Follow us on social media
+        </p>
+
+        <!-- Social Icons -->
+        <div style="margin-bottom: 18px;">
+
+            <!-- Facebook -->
+            <a 
+                href="https://facebook.com/"
+                style="margin: 0 6px; text-decoration: none;"
+            >
+                <img 
+                    src="https://cdn-icons-png.flaticon.com/512/733/733547.png"
+                    width="32"
+                >
+            </a>
+
+            <!-- TikTok -->
+            <a 
+                href="https://tiktok.com/"
+                style="margin: 0 6px; text-decoration: none;"
+            >
+                <img 
+                    src="https://cdn-icons-png.flaticon.com/512/3046/3046121.png"
+                    width="32"
+                >
+            </a>
+
+            <!-- Pinterest -->
+            <a 
+                href="https://pinterest.com/"
+                style="margin: 0 6px; text-decoration: none;"
+            >
+                <img 
+                    src="https://cdn-icons-png.flaticon.com/512/145/145808.png"
+                    width="32"
+                >
+            </a>
+
+            <!-- Telegram -->
+            <a 
+                href="https://telegram.org/"
+                style="margin: 0 6px; text-decoration: none;"
+            >
+                <img 
+                    src="https://cdn-icons-png.flaticon.com/512/2111/2111646.png"
+                    width="32"
+                >
+            </a>
+
+        </div>
+
+        <p style="
+            font-size: 12px;
+            color: #94a3b8;
+            margin: 0;
+            font-weight: bold;
+        ">
+            © 2026 Health Jobs Portal
+        </p>
+
+        <p style="
+            font-size: 11px;
+            color: #94a3b8;
+            margin-top: 6px;
+        ">
+            Pakistan's Healthcare Professional Network
+        </p>
+
+    </div>
+
+</div>
+`;
+
 };
 
-// API Endpoint for Signup Email using Brevo API
+/* =========================================
+SEND WELCOME EMAIL API
+========================================= */
+
 app.post('/api/send-welcome', async (req, res) => {
+
+try {
+
     const { email, name } = req.body;
 
+    // Validation
     if (!email || !name) {
-        return res.status(400).json({ success: false, error: "Missing email or name" });
+        return res.status(400).json({
+            success: false,
+            error: 'Email and name are required'
+        });
     }
 
-    const brevoApiKey = process.env.BREVO_API_KEY; // Aapki Brevo ki API Key
-    const senderEmail = process.env.SENDER_EMAIL;  // Aapka verified email (e.g., supporthealthjobs@gmail.com)
+    // ENV Variables
+    const brevoApiKey = process.env.BREVO_API_KEY;
+    const senderEmail = process.env.SENDER_EMAIL;
 
-    // Brevo API ka payload format
+    // Email Payload
     const emailData = {
-        sender: { name: "Health Jobs Support", email: senderEmail },
-        to: [{ email: email, name: name }],
-        subject: "Welcome to Health Jobs Portal - Professional Network",
+        sender: {
+            name: 'Health Jobs Support',
+            email: senderEmail
+        },
+
+        to: [
+            {
+                email: email,
+                name: name
+            }
+        ],
+
+        subject: 'Welcome to Health Jobs Portal',
+
         htmlContent: signupTemplate(name)
     };
 
-    try {
-        // Direct API call to Brevo (No Nodemailer needed)
-        const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+    // Brevo API Request
+    const response = await fetch(
+        'https://api.brevo.com/v3/smtp/email',
+        {
             method: 'POST',
+
             headers: {
                 'Accept': 'application/json',
                 'Content-Type': 'application/json',
                 'api-key': brevoApiKey
             },
+
             body: JSON.stringify(emailData)
+        }
+    );
+
+    const data = await response.json();
+
+    // Success
+    if (response.ok) {
+
+        console.log('Email Sent:', data);
+
+        return res.status(200).json({
+            success: true,
+            message: 'Welcome email sent successfully'
         });
 
-        const data = await response.json();
+    } else {
 
-        if (response.ok) {
-            console.log("Email sent successfully via Brevo:", data.messageId);
-            res.status(200).json({ success: true, message: "Welcome email sent instantly via Brevo!" });
-        } else {
-            console.error("Brevo API Error:", data);
-            res.status(500).json({ success: false, error: data.message });
-        }
-    } catch (error) {
-        console.error("Server Error during fetch:", error);
-        res.status(500).json({ success: false, error: error.message });
+        console.error('Brevo Error:', data);
+
+        return res.status(500).json({
+            success: false,
+            error: data.message || 'Brevo API Error'
+        });
+
     }
+
+} catch (error) {
+
+    console.error('Server Error:', error);
+
+    return res.status(500).json({
+        success: false,
+        error: error.message
+    });
+
+}
+
 });
 
-// Basic Route to check if server is running
+/* =========================================
+HOME ROUTE
+========================================= */
+
 app.get('/', (req, res) => {
-    res.send('Health Jobs Mail Server is Running Perfectly via Brevo API!');
+res.send('Health Jobs Mail Server Running Successfully');
 });
 
-// Vercel Support
+/* =========================================
+VERCEL EXPORT
+========================================= */
+
 module.exports = app;
 
-// For Local Testing
+/* =========================================
+LOCAL SERVER
+========================================= */
+
 if (process.env.NODE_ENV !== 'production') {
-    const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+});
+
 }
