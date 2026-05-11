@@ -17,11 +17,20 @@ return `
 
     <!-- Header -->
     <div style="text-align: center; padding: 35px 20px 15px;">
-        <img 
-            src="https://healthjobs-portal.web.app/images/banner.png" 
-            alt="Health Jobs Portal"
-            style="height: 75px;"
-        >
+        <!-- PROFESSIONAL FULL WIDTH BANNER --><div style="width:100%;"><img
+    src="https://healthjobs-portal.web.app/images/banner.png"
+    alt="Health Jobs Portal"
+
+    style="
+        width:100%;
+        max-width:600px;
+        height:auto;
+        display:block;
+        border-radius:12px 12px 0 0;
+    "
+>
+
+</div>
     </div>
 
     <!-- Content -->
