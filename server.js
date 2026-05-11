@@ -98,7 +98,7 @@ return `
 
             <!-- Facebook -->
             <a 
-                href="https://facebook.com/"
+                href="https://www.facebook.com/groups/990408886735900/?ref=share&mibextid=NSMWBT"
                 style="margin: 0 6px; text-decoration: none;"
             >
                 <img 
@@ -109,7 +109,7 @@ return `
 
             <!-- TikTok -->
             <a 
-                href="https://tiktok.com/"
+                href="https://www.tiktok.com/@healthjobsportal0?_r=1&_t=ZN-96H8CnwbYfq"
                 style="margin: 0 6px; text-decoration: none;"
             >
                 <img 
@@ -120,7 +120,7 @@ return `
 
             <!-- Pinterest -->
             <a 
-                href="https://pinterest.com/"
+                href="https://pin.it/3OjEVRImQ"
                 style="margin: 0 6px; text-decoration: none;"
             >
                 <img 
@@ -131,7 +131,7 @@ return `
 
             <!-- Telegram -->
             <a 
-                href="https://telegram.org/"
+                href="https://t.me/healthjobsportal"
                 style="margin: 0 6px; text-decoration: none;"
             >
                 <img 
