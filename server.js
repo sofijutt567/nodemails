@@ -114,7 +114,7 @@ function buildFooter() {
           <a href="https://www.facebook.com/groups/990408886735900/?ref=share&mibextid=NSMWBT" style="display:inline-block;margin:0 7px;text-decoration:none;">
             <img src="https://cdn-icons-png.flaticon.com/512/733/733547.png" width="26" height="26" alt="Facebook" style="vertical-align:middle;border:0;opacity:0.75;" />
           </a>
-          <a href="https://www.tiktok.com/@healthjobsportal0?_r=1&_t=ZN-96H8CnwbYfq" style="display:inline-block;margin:0 7px;text-decoration:none;">
+          <a href="https://www.tiktok.com/@healthjobsportal1?_r=1&_t=ZS-96PHNBAFVZN" style="display:inline-block;margin:0 7px;text-decoration:none;">
             <img src="https://cdn-icons-png.flaticon.com/512/3046/3046121.png" width="26" height="26" alt="TikTok" style="vertical-align:middle;border:0;opacity:0.75;" />
           </a>
           <a href="https://pin.it/3OjEVRImQ" style="display:inline-block;margin:0 7px;text-decoration:none;">
