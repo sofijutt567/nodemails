@@ -84,8 +84,8 @@ async function sendEmail({ to, toName, subject, html }) {
 function buildHeader() {
     return `
     <div style="padding:24px 36px;text-align:center;border-bottom:1px solid #e8ecf1;background:#ffffff;">
-      <a href="https://healthjobs-portal.web.app" style="text-decoration:none;display:inline-block;">
-        <img src="https://healthjobs-portal.web.app/images/logo.png"
+      <a href="https://healthjobportal.com" style="text-decoration:none;display:inline-block;">
+        <img src="https://healthjobportal.com/images/logo.png"
              alt="Health Jobs Portal"
              height="52"
              style="height:52px;width:auto;display:inline-block;border:0;" />
@@ -163,7 +163,7 @@ function buildWelcomeEmail({ name }) {
       </table>
     </div>
     <div style="padding:28px 36px;text-align:center;">
-      <a href="https://healthjobs-portal.web.app/index.html"
+      <a href="https://healthjobportal.com/index.html"
          style="display:inline-block;padding:12px 36px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:7px;font-size:14px;font-weight:700;">
         Open My Dashboard →
       </a>
@@ -290,7 +290,7 @@ function buildExpiryEmail({ posterName, posterPic, postTitle, expiryDate, postId
         <tr><td style="padding:6px 0;font-size:14px;color:#334155;">✅ Action &nbsp;<span style="color:#166534;font-weight:600;">Publish a new post to stay active</span></td></tr>
       </table>
       <div style="text-align:center;">
-        <a href="https://healthjobs-portal.web.app"
+        <a href="https://healthjobportal.com"
            style="display:inline-block;padding:12px 36px;background:#dc2626;color:#ffffff;text-decoration:none;border-radius:7px;font-size:14px;font-weight:700;">
           Publish New Post →
         </a>
@@ -351,7 +351,7 @@ app.post('/api/send-notification', async (req, res) => {
                 badgeBg: '#dbeafe',
                 title: jobTitle,
                 rows,
-                ctaUrl: jobLink || 'https://healthjobs-portal.web.app',
+                ctaUrl: jobLink || 'https://healthjobportal.com',
                 ctaText: 'View Job Details',
                 footerNote: 'You received this because your profile matches this job.'
             });
@@ -371,7 +371,7 @@ app.post('/api/send-notification', async (req, res) => {
                 return res.status(400).json({ success: false, message: 'postId and category required.' });
             }
 
-            const postUrl = link || `https://healthjobs-portal.web.app/post-detail.html?id=${postId}`;
+            const postUrl = link || `https://healthjobportal.com/post-detail.html?id=${postId}`;
             const isEmployerPost = postType === 'employer_post';
 
             console.log('Processing:', { postId, title, category, location, postType });
