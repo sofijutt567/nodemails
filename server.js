@@ -437,16 +437,22 @@ app.post('/api/send-notification', async (req, res) => {
                 if (!categoryMatch && !locationMatch) continue;
 
                 // ✅ Duplicate email check
+// ✅ Duplicate email check - CORRECT VERSION
+                const logRef = db.collection('email_logs').doc(`${postId}_${userId}`);
+                let alreadySent = false;
                 try {
-                    const alreadySent = await db.collection('email_logs')
-                        .where('postId', '==', postId)
-                        .where('userId', '==', userId)
-                        .limit(1)
-                        .get();
-                    if (!alreadySent.empty) continue;
+                    await db.runTransaction(async (t) => {
+                        const logDoc = await t.get(logRef);
+                        if (logDoc.exists) {
+                            alreadySent = true;
+                            return;
+                        }
+                        t.set(logRef, { postId, userId, sentAt: new Date().toISOString() });
+                    });
                 } catch (e) {
-                    console.error('Log check error:', e.message);
+                    console.error('Transaction error:', e.message);
                 }
+                if (alreadySent) continue;
 
                 const userProfilePic = user.profilePic || user.photoURL || '';
                 const userName = user.name || user.displayName || 'User';
@@ -479,19 +485,9 @@ app.post('/api/send-notification', async (req, res) => {
                     to: user.email, toName: userName, subject, html
                 });
 
-                if (result.success) {
-                    sent++;
-                    // ✅ Log save karo taake dobara na jaye
-                    try {
-                        await db.collection('email_logs').add({
-                            postId: postId,
-                            userId: userId,
-                            sentAt: new Date().toISOString()
-                        });
-                    } catch (e) {
-                        console.error('Log save error:', e.message);
-                    }
-                }
+if (result.success) {
+    sent++;
+}
             }
 
             console.log(`Sent: ${sent}`);
