@@ -77,7 +77,19 @@ async function sendEmail({ to, toName, subject, html }) {
         return { success: false, error: err.message };
     }
 }
-
+// ============================================
+// SALARY FORMATTER
+// ============================================
+function formatSalary(salary) {
+    if (!salary) return 'Negotiable';
+    
+    // Agar already string hai aur number nahi — as-is return karo
+    const num = parseInt(String(salary).replace(/[^0-9]/g, ''));
+    if (isNaN(num)) return salary;
+    
+    // Pakistani format: 1,50,000
+    return 'PKR ' + num.toLocaleString('en-PK');
+}
 // ============================================
 // SHARED HEADER (Logo)
 // ============================================
@@ -381,17 +393,24 @@ app.post('/api/send-notification', async (req, res) => {
 
             if (posterId) {
                 try {
-                    const posterDoc = await db.collection('users').doc(posterId).get();
-                    if (posterDoc.exists) {
-                        const posterData = posterDoc.data();
-                        realPosterName = posterData.name || posterData.displayName || posterName || 'Health Jobs User';
-                        realPosterPic = posterData.profilePic || posterData.photoURL || '';
-                    }
+const posterDoc = await db.collection('users').doc(posterId).get();
+if (posterDoc.exists) {
+    const posterData = posterDoc.data();
+    realPosterName = posterData.fullName || posterData.facilityName || posterData.name || posterData.displayName || posterName || 'Health Jobs User';
+    realPosterPic = posterData.profilePicUrl || posterData.profilePic || posterData.photoURL || '';
+}
                 } catch (e) {
                     console.error('Poster fetch error:', e.message);
                 }
             }
+// Saare logs ek baar fetch karo
+const logsSnap = await db.collection('email_logs')
+    .where('postId', '==', postId)
+    .get();
 
+const alreadySentUsers = new Set(
+    logsSnap.docs.map(d => d.data().userId)
+);
             const usersSnap = await db.collection('users').get();
 
             if (usersSnap.empty) {
@@ -409,24 +428,56 @@ app.post('/api/send-notification', async (req, res) => {
                 if (!user.email) continue;
                 if (userId === posterId) continue;
 
-                const userType = (user.userType || user.accountType || '').toLowerCase();
-                if (isEmployerPost && userType === 'employer') continue;
-                if (!isEmployerPost && userType !== 'employer') continue;
+const userRole = (user.role || user.userType || user.accountType || '').toLowerCase();
+if (isEmployerPost && userRole === 'employer') continue;
+if (!isEmployerPost && userRole === 'candidate') continue;
 
                 const userCategory = (user.category || user.profession || user.qualification || '').toLowerCase().trim();
                 const userLocation = (user.city || user.location || '').toLowerCase().trim();
 
                 let categoryMatch = false;
-                if (userCategory && postCategoryLower) {
-                    if (userCategory === postCategoryLower) categoryMatch = true;
-                    else if (userCategory.includes(postCategoryLower) || postCategoryLower.includes(userCategory)) categoryMatch = true;
-                    else {
-                        const uWords = userCategory.split(' ');
-                        const pWords = postCategoryLower.split(' ');
-                        if (uWords[0] === pWords[0]) categoryMatch = true;
-                        else if (userCategory.includes(pWords[0]) || postCategoryLower.includes(uWords[0])) categoryMatch = true;
-                    }
-                }
+if (userCategory && postCategoryLower) {
+    if (userCategory === postCategoryLower) {
+        categoryMatch = true;
+    } else {
+        const categoryGroups = {
+    doctor: ['mbbs', 'doctor', 'physician', 'medical officer', 'medical officer', 'm.o', 'mo', 'fcps', 'consultant', 'specialist', 'surgeon', 'cardiologist', 'neurologist', 'pediatrician', 'gynecologist', 'dermatologist', 'psychiatrist', 'ophthalmologist', 'radiologist', 'pathologist', 'anesthesiologist', 'house officer', 'registrar', 'gp', 'general practitioner', 'general physician'],
+    nurse: ['nurse', 'nursing', 'midwife', 'lhv', 'icu nurse', 'ccu nurse', 'staff nurse'],
+    pharmacist: ['pharmacist', 'pharmacy', 'pharm-d', 'pharmd'],
+    lab: ['lab technologist', 'lab technician', 'mlt', 'laboratory', 'blood bank', 'phlebotomist', 'lab tech'],
+    dispenser: ['dispenser', 'compounder', 'pharmacy technician'],
+    physiotherapist: ['physiotherapist', 'dpt', 'physio'],
+    dentist: ['dentist', 'bds', 'orthodontist', 'oral surgeon', 'dental surgeon'],
+    radiology: ['radiographer', 'x-ray', 'mri', 'ct scan', 'sonographer', 'ultrasound', 'imaging'],
+    ot: ['ot technician', 'operation theater', 'surgical technologist', 'ot tech'],
+    paramedic: ['paramedic', 'emt', 'emergency medical', 'rescue'],
+    admin: ['receptionist', 'admin', 'administrator', 'front desk', 'hospital admin'],
+    ward: ['ward boy', 'ward attendant', 'hospital attendant', 'patient care']
+};
+
+const getGroup = (cat) => {
+    const cleaned = cat.toLowerCase().trim();
+    for (const [group, keywords] of Object.entries(categoryGroups)) {
+        // Word boundary check — "nurse" should not match "nursery"
+        if (keywords.some(kw => {
+            const kwClean = kw.trim();
+            return cleaned === kwClean || 
+                   cleaned.startsWith(kwClean + ' ') || 
+                   cleaned.endsWith(' ' + kwClean) || 
+                   cleaned.includes(' ' + kwClean + ' ');
+        })) return group;
+    }
+    return null;
+};
+
+        const userGroup = getGroup(userCategory);
+        const postGroup = getGroup(postCategoryLower);
+
+        if (userGroup && postGroup && userGroup === postGroup) {
+            categoryMatch = true;
+        }
+    }
+}
 
                 let locationMatch = false;
                 if (userLocation && postLocationLower) {
@@ -434,25 +485,11 @@ app.post('/api/send-notification', async (req, res) => {
                     else if (userLocation.includes(postLocationLower) || postLocationLower.includes(userLocation)) locationMatch = true;
                 }
 
-                if (!categoryMatch && !locationMatch) continue;
+               if (!categoryMatch) continue;
+if (postLocationLower && userLocation && !locationMatch) continue;
 
-                // ✅ Duplicate email check
-// ✅ Duplicate email check - CORRECT VERSION
-                const logRef = db.collection('email_logs').doc(`${postId}_${userId}`);
-                let alreadySent = false;
-                try {
-                    await db.runTransaction(async (t) => {
-                        const logDoc = await t.get(logRef);
-                        if (logDoc.exists) {
-                            alreadySent = true;
-                            return;
-                        }
-                        t.set(logRef, { postId, userId, sentAt: new Date().toISOString() });
-                    });
-                } catch (e) {
-                    console.error('Transaction error:', e.message);
-                }
-                if (alreadySent) continue;
+// ✅ Duplicate check — Set se (0 extra reads)
+                if (alreadySentUsers.has(userId)) continue;
 
                 const userProfilePic = user.profilePic || user.photoURL || '';
                 const userName = user.name || user.displayName || 'User';
@@ -460,7 +497,7 @@ app.post('/api/send-notification', async (req, res) => {
                 const rows = [
                     { label: '🏥 Category', value: category },
                     { label: '📍 Location', value: location || 'N/A' },
-                    { label: '💰 Salary', value: salary || 'Negotiable' }
+{ label: '💰 Salary', value: formatSalary(salary) }
                 ];
 
                 const isJob = isEmployerPost;
@@ -485,9 +522,17 @@ app.post('/api/send-notification', async (req, res) => {
                     to: user.email, toName: userName, subject, html
                 });
 
-if (result.success) {
-    sent++;
-}
+                // ✅ Sirf success pe log karo
+                if (result.success) {
+                    sent++;
+                    try {
+                        await db.collection('email_logs')
+                            .doc(`${postId}_${userId}`)
+                            .set({ postId, userId, sentAt: new Date().toISOString() });
+                    } catch (e) {
+                        console.error('Log write error:', e.message);
+                    }
+                }
             }
 
             console.log(`Sent: ${sent}`);
