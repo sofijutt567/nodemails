@@ -14,7 +14,6 @@ let db = null;
 
 if (!admin.apps.length) {
     const serviceAccountStr = process.env.FIREBASE_SERVICE_ACCOUNT;
-
     if (!serviceAccountStr || serviceAccountStr === 'undefined') {
         console.error('FIREBASE_SERVICE_ACCOUNT missing!');
     } else {
@@ -63,87 +62,222 @@ async function sendEmail({ to, toName, subject, html }) {
         });
 
         const result = await response.json();
-
         if (!response.ok) {
             console.error('Brevo error:', result.message);
             return { success: false, error: result.message };
         }
-
         console.log('Email sent to:', to);
         return { success: true };
-
     } catch (err) {
         console.error('Email failed:', err.message);
         return { success: false, error: err.message };
     }
 }
+
 // ============================================
 // SALARY FORMATTER
 // ============================================
 function formatSalary(salary) {
     if (!salary) return 'Negotiable';
-    
-    // Agar already string hai aur number nahi — as-is return karo
     const num = parseInt(String(salary).replace(/[^0-9]/g, ''));
     if (isNaN(num)) return salary;
-    
-    // Pakistani format: 1,50,000
     return 'PKR ' + num.toLocaleString('en-PK');
 }
+
 // ============================================
-// SHARED HEADER (Logo)
+// CATEGORY GROUPS (Improved Matching)
+// ============================================
+const categoryGroups = {
+    doctor: [
+        'mbbs', 'doctor', 'physician', 'medical officer', 'm.o', 'mo',
+        'fcps', 'consultant', 'specialist', 'surgeon', 'cardiologist',
+        'neurologist', 'pediatrician', 'gynecologist', 'dermatologist',
+        'psychiatrist', 'ophthalmologist', 'radiologist', 'pathologist',
+        'anesthesiologist', 'house officer', 'registrar', 'gp',
+        'general practitioner', 'general physician'
+    ],
+    nurse: [
+        'nurse', 'nursing', 'midwife', 'lhv', 'icu nurse', 'ccu nurse',
+        'staff nurse', 'rn', 'registered nurse', 'charge nurse', 'head nurse'
+    ],
+    pharmacist: [
+        'pharmacist', 'pharmacy', 'pharm-d', 'pharmd', 'b.pharm', 'bpharm'
+    ],
+    lab: [
+        'lab technologist', 'lab technician', 'mlt', 'laboratory',
+        'blood bank', 'phlebotomist', 'lab tech', 'medical lab',
+        'clinical lab', 'pathology technician'
+    ],
+    // Dispenser group — compounder, ward boy, pharmacy technician sab yahan
+    dispenser: [
+        'dispenser', 'compounder', 'pharmacy technician',
+        'ward boy', 'ward attendant', 'hospital attendant',
+        'patient care attendant', 'nursing attendant', 'ot attendant',
+        'medical attendant', 'helper', 'hospital helper'
+    ],
+    physiotherapist: [
+        'physiotherapist', 'dpt', 'physio', 'physical therapist',
+        'rehabilitation', 'occupational therapist'
+    ],
+    dentist: [
+        'dentist', 'bds', 'orthodontist', 'oral surgeon', 'dental surgeon',
+        'dental technician', 'dental assistant', 'dental hygienist'
+    ],
+    radiology: [
+        'radiographer', 'x-ray', 'mri', 'ct scan', 'sonographer',
+        'ultrasound', 'imaging', 'radiology technician', 'nuclear medicine'
+    ],
+    ot: [
+        'ot technician', 'operation theater', 'surgical technologist',
+        'ot tech', 'scrub technician', 'anesthesia technician'
+    ],
+    paramedic: [
+        'paramedic', 'emt', 'emergency medical', 'rescue', 'first aid',
+        'emergency technician', 'ambulance'
+    ],
+    admin: [
+        'receptionist', 'admin', 'administrator', 'front desk',
+        'hospital admin', 'medical secretary', 'billing officer',
+        'medical billing', 'hospital management', 'health administrator',
+        'hr', 'human resources', 'accounts', 'accountant', 'finance'
+    ],
+    nutrition: [
+        'nutritionist', 'dietitian', 'dietician', 'nutrition', 'food service'
+    ]
+};
+
+function getCategoryGroup(cat) {
+    if (!cat) return null;
+    const cleaned = cat.toLowerCase().trim();
+    for (const [group, keywords] of Object.entries(categoryGroups)) {
+        if (keywords.some(kw => {
+            const k = kw.trim();
+            return cleaned === k ||
+                cleaned.startsWith(k + ' ') ||
+                cleaned.endsWith(' ' + k) ||
+                cleaned.includes(' ' + k + ' ');
+        })) return group;
+    }
+    return null;
+}
+
+// ============================================
+// LOCATION MATCHING (City / District level)
+// ============================================
+// Major cities and their common aliases / nearby areas
+const locationAliases = {
+    lahore: ['lahore', 'lhr', 'lahore city', 'model town', 'gulberg', 'johar town', 'dha lahore'],
+    karachi: ['karachi', 'khi', 'karachi city', 'clifton', 'defence karachi', 'korangi', 'gulshan'],
+    islamabad: ['islamabad', 'isb', 'i-8', 'i-10', 'f-6', 'f-7', 'g-9', 'g-10'],
+    rawalpindi: ['rawalpindi', 'rwp', 'pindi', 'saddar rawalpindi'],
+    faisalabad: ['faisalabad', 'fsd', 'lyallpur'],
+    multan: ['multan', 'mtn', 'multan city'],
+    peshawar: ['peshawar', 'pew', 'peshawar city'],
+    quetta: ['quetta', 'uet', 'quetta city'],
+    gujranwala: ['gujranwala', 'grw'],
+    sialkot: ['sialkot', 'skт'],
+    hyderabad: ['hyderabad', 'hyd', 'hyderabad city'],
+    abbottabad: ['abbottabad', 'abb'],
+    bahawalpur: ['bahawalpur', 'bwp'],
+    sargodha: ['sargodha', 'sgd'],
+    gujrat: ['gujrat', 'gjt'],
+    sheikhupura: ['sheikhupura', 'sup'],
+    nankana: ['nankana', 'nankana sahib', 'nanakana'],
+    kasur: ['kasur', 'kasur city'],
+    okara: ['okara', 'okara city'],
+    sahiwal: ['sahiwal', 'montgomery'],
+    narowal: ['narowal'],
+    hafizabad: ['hafizabad'],
+    chiniot: ['chiniot'],
+    jhang: ['jhang', 'jhang city'],
+    toba: ['toba', 'toba tek singh'],
+    mianwali: ['mianwali'],
+    bhakkar: ['bhakkar'],
+    khushab: ['khushab'],
+    chakwal: ['chakwal'],
+    jhelum: ['jhelum'],
+    attock: ['attock', 'campbellpur'],
+    mandi: ['mandi bahauddin', 'mandi'],
+    narowal: ['narowal'],
+    vehari: ['vehari'],
+    lodhran: ['lodhran'],
+    pakpattan: ['pakpattan'],
+    khanewal: ['khanewal'],
+    muzaffargarh: ['muzaffargarh'],
+    layyah: ['layyah'],
+    rajanpur: ['rajanpur'],
+    dera: ['dera ghazi khan', 'd.g. khan', 'dg khan'],
+    rahim: ['rahim yar khan', 'rahimyar khan', 'r.y.k'],
+};
+
+function getLocationGroup(loc) {
+    if (!loc) return null;
+    const cleaned = loc.toLowerCase().trim();
+    for (const [city, aliases] of Object.entries(locationAliases)) {
+        if (aliases.some(a => cleaned.includes(a) || a.includes(cleaned))) return city;
+    }
+    // fallback: return cleaned as-is for generic includes check
+    return cleaned;
+}
+
+function locationsMatch(postLoc, userLoc) {
+    if (!postLoc || !userLoc) return true; // if either missing, don't filter
+    const pGroup = getLocationGroup(postLoc);
+    const uGroup = getLocationGroup(userLoc);
+    if (!pGroup || !uGroup) {
+        // fallback to basic includes
+        const p = postLoc.toLowerCase().trim();
+        const u = userLoc.toLowerCase().trim();
+        return p === u || p.includes(u) || u.includes(p);
+    }
+    return pGroup === uGroup;
+}
+
+// ============================================
+// SHARED HEADER
 // ============================================
 function buildHeader() {
     return `
-    <div style="padding:24px 36px;text-align:center;border-bottom:1px solid #e8ecf1;background:#ffffff;">
+    <div style="padding:20px 32px;text-align:center;border-bottom:1px solid #e8ecf1;background:#ffffff;">
       <a href="https://healthjobportal.com" style="text-decoration:none;display:inline-block;">
         <img src="https://healthjobportal.com/images/logo.png"
              alt="Health Jobs Portal"
-             height="52"
-             style="height:52px;width:auto;display:inline-block;border:0;" />
+             height="44"
+             style="height:44px;width:auto;display:inline-block;border:0;" />
       </a>
     </div>`;
 }
 
 // ============================================
-// SHARED FOOTER HTML
+// SHARED FOOTER (No social icons, with links)
 // ============================================
 function buildFooter() {
     return `
-    <div style="padding:24px 36px;text-align:center;border-top:1px solid #e8ecf1;background:#f8fafc;">
-      <p style="font-size:13px;color:#374151;margin:0 0 6px;font-weight:600;">📱 Download the App</p>
-      <p style="font-size:12px;color:#64748b;margin:0 0 12px;line-height:1.5;">
-        Get real-time job alerts and manage your profile on the go.
+    <div style="padding:20px 32px;text-align:center;border-top:1px solid #e8ecf1;background:#f8fafc;">
+      <p style="font-size:12px;color:#374151;margin:0 0 6px;font-weight:600;">📱 Download the App</p>
+      <p style="font-size:11px;color:#64748b;margin:0 0 10px;line-height:1.5;">
+        Get real-time job alerts on the go.
       </p>
       <a href="https://apkpure.com/p/com.sufian.healthjobs"
          target="_blank"
-         style="display:inline-block;padding:10px 24px;background:#0f172a;color:#ffffff;text-decoration:none;border-radius:7px;font-size:13px;font-weight:600;letter-spacing:0.2px;margin-bottom:20px;">
+         style="display:inline-block;padding:9px 22px;background:#0f172a;color:#ffffff;text-decoration:none;border-radius:6px;font-size:12px;font-weight:600;margin-bottom:16px;">
         ⬇ Download Android App
       </a>
-      <div style="border-top:1px solid #e8ecf1;padding-top:18px;margin-top:4px;">
-        <p style="font-size:13px;color:#64748b;margin:0 0 12px;font-weight:500;">Follow us on social media</p>
-        <div style="margin-bottom:14px;">
-          <a href="https://www.facebook.com/groups/990408886735900/?ref=share&mibextid=NSMWBT" style="display:inline-block;margin:0 7px;text-decoration:none;">
-            <img src="https://cdn-icons-png.flaticon.com/512/733/733547.png" width="26" height="26" alt="Facebook" style="vertical-align:middle;border:0;opacity:0.75;" />
-          </a>
-          <a href="https://www.tiktok.com/@healthjobsportal1?_r=1&_t=ZS-96PHNBAFVZN" style="display:inline-block;margin:0 7px;text-decoration:none;">
-            <img src="https://cdn-icons-png.flaticon.com/512/3046/3046121.png" width="26" height="26" alt="TikTok" style="vertical-align:middle;border:0;opacity:0.75;" />
-          </a>
-          <a href="https://pin.it/3OjEVRImQ" style="display:inline-block;margin:0 7px;text-decoration:none;">
-            <img src="https://cdn-icons-png.flaticon.com/512/145/145808.png" width="26" height="26" alt="Pinterest" style="vertical-align:middle;border:0;opacity:0.75;" />
-          </a>
-          <a href="https://t.me/healthjobsportal" style="display:inline-block;margin:0 7px;text-decoration:none;">
-            <img src="https://cdn-icons-png.flaticon.com/512/2111/2111646.png" width="26" height="26" alt="Telegram" style="vertical-align:middle;border:0;opacity:0.75;" />
-          </a>
-        </div>
-        <p style="font-size:12px;color:#94a3b8;margin:0;font-weight:500;">© 2026 Health Jobs Portal | Powered by SufianX</p>
-        <p style="font-size:11px;color:#b0b8c1;margin:4px 0 0;">Pakistan's #1 Digital Healthcare Network</p>
+      <div style="border-top:1px solid #e8ecf1;padding-top:14px;margin-top:4px;">
+        <p style="font-size:11px;color:#94a3b8;margin:0 0 8px;">
+          <a href="https://healthjobportal.com/terms.html" style="color:#64748b;text-decoration:none;">Terms of Service</a>
+          &nbsp;·&nbsp;
+          <a href="https://healthjobportal.com/privacy.html" style="color:#64748b;text-decoration:none;">Privacy Policy</a>
+          &nbsp;·&nbsp;
+          <a href="https://healthjobportal.com/about.html" style="color:#64748b;text-decoration:none;">About Us</a>
+        </p>
+        <p style="font-size:11px;color:#b0b8c1;margin:0;">© 2026 Health Jobs Portal · Pakistan's #1 Digital Healthcare Network</p>
       </div>
     </div>`;
 }
 
 // ============================================
-// WELCOME EMAIL TEMPLATE
+// WELCOME EMAIL TEMPLATE (Indeed style)
 // ============================================
 function buildWelcomeEmail({ name }) {
     return `<!DOCTYPE html>
@@ -153,32 +287,25 @@ function buildWelcomeEmail({ name }) {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Welcome – Health Jobs Portal</title>
 </head>
-<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',Arial,sans-serif;">
-  <div style="max-width:580px;margin:32px auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);">
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;">
+  <div style="max-width:560px;margin:28px auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
     ${buildHeader()}
-    <div style="padding:32px 36px 0;text-align:center;">
-      <h1 style="margin:0 0 10px;font-size:22px;font-weight:700;color:#0f172a;">Welcome, ${name}! 🎉</h1>
-      <p style="margin:0;font-size:14px;color:#475569;line-height:1.7;">
-        You've successfully joined <strong style="color:#2563eb;">Health Jobs Portal</strong> —
-        Pakistan's #1 digital healthcare network.
+    <div style="padding:28px 32px;">
+      <p style="margin:0 0 14px;font-size:15px;color:#111827;font-weight:600;">Welcome, ${name}!</p>
+      <p style="margin:0 0 14px;font-size:13px;color:#374151;line-height:1.7;">
+        Your account on <strong>Health Jobs Portal</strong> has been created successfully.
+        You can now browse and apply for healthcare jobs across Pakistan, or post jobs to
+        find qualified medical professionals.
       </p>
-    </div>
-    <div style="margin:24px 36px 0;border-top:1px solid #e8ecf1;"></div>
-    <div style="padding:20px 36px 0;">
-      <p style="margin:0 0 14px;font-size:13px;font-weight:600;color:#64748b;text-transform:uppercase;letter-spacing:0.7px;">What you can do</p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0">
-        <tr><td style="padding:8px 0;font-size:14px;color:#334155;border-bottom:1px solid #f1f5f9;">🔍&nbsp; <strong>Find Jobs</strong> — Browse hundreds of healthcare jobs across Pakistan</td></tr>
-        <tr><td style="padding:8px 0;font-size:14px;color:#334155;border-bottom:1px solid #f1f5f9;">👥&nbsp; <strong>Hire Staff</strong> — Find doctors, nurses, and medical professionals</td></tr>
-        <tr><td style="padding:8px 0;font-size:14px;color:#334155;border-bottom:1px solid #f1f5f9;">🔔&nbsp; <strong>Job Alerts</strong> — Get real-time notifications for matching jobs</td></tr>
-        <tr><td style="padding:8px 0;font-size:14px;color:#334155;border-bottom:1px solid #f1f5f9;">💬&nbsp; <strong>Direct Chat</strong> — Message employers and candidates directly</td></tr>
-        <tr><td style="padding:8px 0;font-size:14px;color:#334155;">🌐&nbsp; <strong>Network</strong> — Build your healthcare professional network</td></tr>
-      </table>
-    </div>
-    <div style="padding:28px 36px;text-align:center;">
-      <a href="https://healthjobportal.com/index.html"
-         style="display:inline-block;padding:12px 36px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:7px;font-size:14px;font-weight:700;">
-        Open My Dashboard →
-      </a>
+      <p style="margin:0 0 20px;font-size:13px;color:#374151;line-height:1.7;">
+        We'll notify you by email when new jobs matching your profile become available.
+      </p>
+      <div style="text-align:left;">
+        <a href="https://healthjobportal.com/index.html"
+           style="display:inline-block;padding:10px 24px;background:#1d4ed8;color:#ffffff;text-decoration:none;border-radius:5px;font-size:13px;font-weight:600;">
+          Go to Dashboard
+        </a>
+      </div>
     </div>
     ${buildFooter()}
   </div>
@@ -187,22 +314,13 @@ function buildWelcomeEmail({ name }) {
 }
 
 // ============================================
-// NEW POST ALERT EMAIL TEMPLATE
+// NEW POST ALERT EMAIL TEMPLATE (Indeed style)
 // ============================================
-function buildAlertEmail({ userName, userProfilePic, badgeLabel, badgeColor, badgeBg, title, rows, ctaUrl, ctaText, footerNote, posterName, posterPic }) {
-
-    const recipientAvatar = userProfilePic
-        ? `<img src="${userProfilePic}" alt="${userName}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;border:2px solid #e2e8f0;display:inline-block;vertical-align:middle;" />`
-        : `<div style="width:40px;height:40px;border-radius:50%;background:#2563eb;display:inline-block;text-align:center;line-height:40px;font-size:17px;font-weight:700;color:#fff;vertical-align:middle;">${(userName || 'U').charAt(0).toUpperCase()}</div>`;
-
-    const posterAvatar = posterPic
-        ? `<img src="${posterPic}" alt="${posterName}" style="width:34px;height:34px;border-radius:50%;object-fit:cover;border:2px solid #e2e8f0;display:inline-block;vertical-align:middle;margin-right:8px;" />`
-        : `<div style="width:34px;height:34px;border-radius:50%;background:#64748b;display:inline-block;text-align:center;line-height:34px;font-size:14px;font-weight:700;color:#fff;vertical-align:middle;margin-right:8px;">${(posterName || 'U').charAt(0).toUpperCase()}</div>`;
-
-    const detailList = rows.map(r => `
+function buildAlertEmail({ userName, badgeLabel, title, rows, ctaUrl, isJob, posterName }) {
+    const detailRows = rows.map(r => `
       <tr>
-        <td style="padding:6px 0;font-size:14px;color:#334155;border-bottom:1px solid #f8fafc;line-height:1.5;">
-          ${r.label}&nbsp;&nbsp;<span style="color:#0f172a;font-weight:600;">${r.value}</span>
+        <td style="padding:5px 0;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6;line-height:1.5;">
+          ${r.label}&nbsp; <span style="color:#111827;font-weight:600;">${r.value}</span>
         </td>
       </tr>`).join('');
 
@@ -213,41 +331,34 @@ function buildAlertEmail({ userName, userProfilePic, badgeLabel, badgeColor, bad
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${title}</title>
 </head>
-<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',Arial,sans-serif;">
-  <div style="max-width:580px;margin:32px auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);">
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;">
+  <div style="max-width:560px;margin:28px auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
     ${buildHeader()}
-    <div style="padding:20px 36px 16px;border-bottom:1px solid #f1f5f9;">
-      <table width="100%" cellpadding="0" cellspacing="0" border="0">
-        <tr>
-          <td valign="middle">
-            <p style="margin:0;font-size:16px;font-weight:700;color:#0f172a;">Hello, ${userName} 👋</p>
-            <p style="margin:3px 0 0;font-size:13px;color:#64748b;">A new post matches your profile</p>
-          </td>
-          <td align="right" valign="middle">
-            ${recipientAvatar}
-            <div style="margin-top:5px;text-align:right;">
-              <span style="display:inline-block;padding:3px 10px;background:${badgeBg};color:${badgeColor};font-size:11px;font-weight:700;border-radius:20px;">${badgeLabel}</span>
-            </div>
-          </td>
-        </tr>
+    <div style="padding:24px 32px 28px;">
+
+      <p style="margin:0 0 4px;font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;">${badgeLabel}</p>
+      <p style="margin:0 0 16px;font-size:15px;font-weight:700;color:#111827;line-height:1.4;">${title}</p>
+
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:18px;">
+        ${detailRows}
       </table>
-    </div>
-    <div style="padding:24px 36px;">
-      <p style="margin:0 0 14px;font-size:17px;font-weight:700;color:#0f172a;line-height:1.4;">${title}</p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:20px;">${detailList}</table>
-      <div style="padding-top:14px;border-top:1px solid #f1f5f9;margin-bottom:24px;">
-        <p style="margin:0 0 8px;font-size:12px;color:#94a3b8;font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">Posted by</p>
-        <table cellpadding="0" cellspacing="0" border="0">
-          <tr>
-            <td valign="middle">${posterAvatar}</td>
-            <td valign="middle" style="font-size:14px;font-weight:600;color:#0f172a;">${posterName || 'Health Jobs User'}</td>
-          </tr>
-        </table>
+
+      <p style="margin:0 0 18px;font-size:13px;color:#374151;line-height:1.7;">
+        ${isJob
+            ? `A new job has been posted that matches your profile. Review the details and apply if you're interested.`
+            : `A new candidate profile has been posted that matches your requirements.`
+        }
+      </p>
+
+      <p style="margin:0 0 4px;font-size:11px;color:#9ca3af;">Posted by: <strong style="color:#374151;">${posterName || 'Health Jobs User'}</strong></p>
+
+      <div style="margin-top:20px;">
+        <a href="${ctaUrl}"
+           style="display:inline-block;padding:10px 24px;background:#1d4ed8;color:#ffffff;text-decoration:none;border-radius:5px;font-size:13px;font-weight:600;">
+          ${isJob ? 'Apply Now' : 'View Candidate'}
+        </a>
       </div>
-      <div style="text-align:center;">
-        <a href="${ctaUrl}" style="display:inline-block;padding:12px 36px;background:#2563eb;color:#ffffff;text-decoration:none;border-radius:7px;font-size:14px;font-weight:700;">${ctaText} →</a>
-        ${footerNote ? `<p style="font-size:12px;color:#94a3b8;margin:10px 0 0;">${footerNote}</p>` : ''}
-      </div>
+
     </div>
     ${buildFooter()}
   </div>
@@ -256,14 +367,9 @@ function buildAlertEmail({ userName, userProfilePic, badgeLabel, badgeColor, bad
 }
 
 // ============================================
-// EXPIRY WARNING EMAIL TEMPLATE
+// EXPIRY WARNING EMAIL TEMPLATE (Indeed style)
 // ============================================
-function buildExpiryEmail({ posterName, posterPic, postTitle, expiryDate, postId }) {
-
-    const avatarBlock = posterPic
-        ? `<img src="${posterPic}" alt="${posterName}" style="width:40px;height:40px;border-radius:50%;object-fit:cover;border:2px solid #fecaca;display:inline-block;vertical-align:middle;" />`
-        : `<div style="width:40px;height:40px;border-radius:50%;background:#dc2626;display:inline-block;text-align:center;line-height:40px;font-size:17px;font-weight:700;color:#fff;vertical-align:middle;">${(posterName || 'U').charAt(0).toUpperCase()}</div>`;
-
+function buildExpiryEmail({ posterName, postTitle, expiryDate }) {
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -271,42 +377,25 @@ function buildExpiryEmail({ posterName, posterPic, postTitle, expiryDate, postId
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Post Expiry Warning</title>
 </head>
-<body style="margin:0;padding:0;background:#f1f5f9;font-family:'Segoe UI',Arial,sans-serif;">
-  <div style="max-width:580px;margin:32px auto;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);">
+<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;">
+  <div style="max-width:560px;margin:28px auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
     ${buildHeader()}
-    <div style="padding:20px 36px 16px;border-bottom:1px solid #f1f5f9;">
-      <table width="100%" cellpadding="0" cellspacing="0" border="0">
-        <tr>
-          <td valign="middle">
-            <p style="margin:0;font-size:16px;font-weight:700;color:#0f172a;">Hello, ${posterName} 👋</p>
-            <p style="margin:3px 0 0;font-size:13px;color:#64748b;">Your post is expiring soon</p>
-          </td>
-          <td align="right" valign="middle">
-            ${avatarBlock}
-            <div style="margin-top:5px;text-align:right;">
-              <span style="display:inline-block;padding:3px 10px;background:#fee2e2;color:#dc2626;font-size:11px;font-weight:700;border-radius:20px;">⚠️ Expiring Soon</span>
-            </div>
-          </td>
-        </tr>
-      </table>
-    </div>
-    <div style="padding:24px 36px;">
-      <p style="margin:0 0 16px;font-size:14px;line-height:1.7;color:#475569;">
-        Your post expires in the next <strong style="color:#dc2626;">24 hours</strong>.
-        Publish a new post to stay visible to candidates.
+    <div style="padding:24px 32px 28px;">
+      <p style="margin:0 0 4px;font-size:11px;color:#dc2626;text-transform:uppercase;letter-spacing:0.5px;">⚠ Post Expiring Soon</p>
+      <p style="margin:0 0 16px;font-size:15px;font-weight:700;color:#111827;line-height:1.4;">${postTitle}</p>
+      <p style="margin:0 0 14px;font-size:13px;color:#374151;line-height:1.7;">
+        Hello ${posterName}, your post will expire in the next <strong style="color:#dc2626;">24 hours</strong>.
+        Please publish a new post to stay visible to candidates across Pakistan.
       </p>
-      <p style="margin:0 0 14px;font-size:17px;font-weight:700;color:#0f172a;line-height:1.4;">${postTitle}</p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:24px;">
-        <tr><td style="padding:6px 0;font-size:14px;color:#334155;border-bottom:1px solid #f8fafc;">⏰ Expires at &nbsp;<span style="color:#dc2626;font-weight:700;">${expiryDate}</span></td></tr>
-        <tr><td style="padding:6px 0;font-size:14px;color:#334155;border-bottom:1px solid #f8fafc;">📌 Status &nbsp;<span style="color:#b45309;font-weight:600;">Expiring in 24 hours</span></td></tr>
-        <tr><td style="padding:6px 0;font-size:14px;color:#334155;">✅ Action &nbsp;<span style="color:#166534;font-weight:600;">Publish a new post to stay active</span></td></tr>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:20px;">
+        <tr><td style="padding:5px 0;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6;">⏰ Expires at &nbsp;<span style="color:#dc2626;font-weight:600;">${expiryDate}</span></td></tr>
+        <tr><td style="padding:5px 0;font-size:13px;color:#374151;">✅ Action &nbsp;<span style="color:#166534;font-weight:600;">Publish a new post to stay active</span></td></tr>
       </table>
-      <div style="text-align:center;">
+      <div>
         <a href="https://healthjobportal.com"
-           style="display:inline-block;padding:12px 36px;background:#dc2626;color:#ffffff;text-decoration:none;border-radius:7px;font-size:14px;font-weight:700;">
-          Publish New Post →
+           style="display:inline-block;padding:10px 24px;background:#dc2626;color:#ffffff;text-decoration:none;border-radius:5px;font-size:13px;font-weight:600;">
+          Publish New Post
         </a>
-        <p style="font-size:12px;color:#94a3b8;margin:10px 0 0;">Keep your post live to reach more candidates across Pakistan.</p>
       </div>
     </div>
     ${buildFooter()}
@@ -326,10 +415,10 @@ app.post('/api/send-notification', async (req, res) => {
             jobTitle, jobLocation, jobLink, matchScore
         } = req.body;
 
-        // TYPE 1: WELCOME EMAIL
+        // ── TYPE 1: WELCOME EMAIL ──────────────────────────────
         if (type === 'welcome') {
             if (!email || !name) {
-                return res.status(400).json({ success: false, error: 'Email and name required for welcome email' });
+                return res.status(400).json({ success: false, error: 'Email and name required' });
             }
             const html = buildWelcomeEmail({ name });
             const result = await sendEmail({
@@ -342,7 +431,7 @@ app.post('/api/send-notification', async (req, res) => {
                 : res.status(500).json({ success: false, error: result.error });
         }
 
-        // TYPE 2: JOB ALERT (Single User)
+        // ── TYPE 2: JOB ALERT (Single User) ───────────────────
         if (type === 'job-alert') {
             if (!email || !name || !jobTitle) {
                 return res.status(400).json({ success: false, error: 'Email, name, jobTitle required' });
@@ -351,25 +440,20 @@ app.post('/api/send-notification', async (req, res) => {
                 { label: '💼 Position', value: jobTitle },
                 { label: '📍 Location', value: jobLocation || 'Pakistan' }
             ];
-            if (matchScore) rows.push({ label: '🎯 Match Score', value: matchScore + '%' });
+            if (matchScore) rows.push({ label: '🎯 Match', value: matchScore + '%' });
 
             const html = buildAlertEmail({
                 userName: name,
-                userProfilePic: '',
-                posterName: '',
-                posterPic: '',
-                badgeLabel: '🔔 Job Alert',
-                badgeColor: '#1d4ed8',
-                badgeBg: '#dbeafe',
+                badgeLabel: '🔔 New Job Alert',
                 title: jobTitle,
                 rows,
                 ctaUrl: jobLink || 'https://healthjobportal.com',
-                ctaText: 'View Job Details',
-                footerNote: 'You received this because your profile matches this job.'
+                isJob: true,
+                posterName: ''
             });
             const result = await sendEmail({
                 to: email, toName: name,
-                subject: `New Job Alert: ${jobTitle} — ${jobLocation || 'Pakistan'}`,
+                subject: `New Job: ${jobTitle} — ${jobLocation || 'Pakistan'}`,
                 html
             });
             return result.success
@@ -377,7 +461,7 @@ app.post('/api/send-notification', async (req, res) => {
                 : res.status(500).json({ success: false, error: result.error });
         }
 
-        // TYPE 3: NEW POST ALERT (Matched Users)
+        // ── TYPE 3: NEW POST ALERT (Matched Users) ────────────
         if (type === 'new-post') {
             if (!postId || !category) {
                 return res.status(400).json({ success: false, message: 'postId and category required.' });
@@ -388,38 +472,42 @@ app.post('/api/send-notification', async (req, res) => {
 
             console.log('Processing:', { postId, title, category, location, postType });
 
+            // Fetch poster info
             let realPosterName = posterName || 'Health Jobs User';
             let realPosterPic = '';
-
             if (posterId) {
                 try {
-const posterDoc = await db.collection('users').doc(posterId).get();
-if (posterDoc.exists) {
-    const posterData = posterDoc.data();
-    realPosterName = posterData.fullName || posterData.facilityName || posterData.name || posterData.displayName || posterName || 'Health Jobs User';
-    realPosterPic = posterData.profilePicUrl || posterData.profilePic || posterData.photoURL || '';
-}
+                    const posterDoc = await db.collection('users').doc(posterId).get();
+                    if (posterDoc.exists) {
+                        const d = posterDoc.data();
+                        realPosterName = d.fullName || d.facilityName || d.name || d.displayName || posterName || 'Health Jobs User';
+                        realPosterPic = d.profilePicUrl || d.profilePic || d.photoURL || '';
+                    }
                 } catch (e) {
                     console.error('Poster fetch error:', e.message);
                 }
             }
-// Saare logs ek baar fetch karo
-const logsSnap = await db.collection('email_logs')
-    .where('postId', '==', postId)
-    .get();
 
-const alreadySentUsers = new Set(
-    logsSnap.docs.map(d => d.data().userId)
-);
+            // Fetch already-sent logs (duplicate prevention)
+            const logsSnap = await db.collection('email_logs')
+                .where('postId', '==', postId)
+                .get();
+            const alreadySentUsers = new Set(logsSnap.docs.map(d => d.data().userId));
+
+            // Fetch all users
             const usersSnap = await db.collection('users').get();
-
             if (usersSnap.empty) {
                 return res.json({ success: true, message: 'No users found.', sent: 0 });
             }
 
             let sent = 0;
             const postCategoryLower = category.toLowerCase().trim();
-            const postLocationLower = (location || '').toLowerCase().trim();
+            const postTitleLower = (title || '').toLowerCase().trim();
+            const postCatGroup = getCategoryGroup(postCategoryLower);
+            // Also check title for category group
+            const postTitleGroup = getCategoryGroup(postTitleLower);
+            // Use whichever group we found
+            const effectivePostGroup = postCatGroup || postTitleGroup;
 
             for (const userDoc of usersSnap.docs) {
                 const user = userDoc.data();
@@ -428,101 +516,72 @@ const alreadySentUsers = new Set(
                 if (!user.email) continue;
                 if (userId === posterId) continue;
 
-const userRole = (user.role || user.userType || user.accountType || '').toLowerCase();
-if (isEmployerPost && userRole === 'employer') continue;
-if (!isEmployerPost && userRole === 'candidate') continue;
+                // Role filter
+                const userRole = (user.role || user.userType || user.accountType || '').toLowerCase();
+                if (isEmployerPost && userRole === 'employer') continue;
+                if (!isEmployerPost && userRole === 'candidate') continue;
 
-                const userCategory = (user.category || user.profession || user.qualification || '').toLowerCase().trim();
-                const userLocation = (user.city || user.location || '').toLowerCase().trim();
-
-                let categoryMatch = false;
-if (userCategory && postCategoryLower) {
-    if (userCategory === postCategoryLower) {
-        categoryMatch = true;
-    } else {
-        const categoryGroups = {
-    doctor: ['mbbs', 'doctor', 'physician', 'medical officer', 'medical officer', 'm.o', 'mo', 'fcps', 'consultant', 'specialist', 'surgeon', 'cardiologist', 'neurologist', 'pediatrician', 'gynecologist', 'dermatologist', 'psychiatrist', 'ophthalmologist', 'radiologist', 'pathologist', 'anesthesiologist', 'house officer', 'registrar', 'gp', 'general practitioner', 'general physician'],
-    nurse: ['nurse', 'nursing', 'midwife', 'lhv', 'icu nurse', 'ccu nurse', 'staff nurse'],
-    pharmacist: ['pharmacist', 'pharmacy', 'pharm-d', 'pharmd'],
-    lab: ['lab technologist', 'lab technician', 'mlt', 'laboratory', 'blood bank', 'phlebotomist', 'lab tech'],
-    dispenser: ['dispenser', 'compounder', 'pharmacy technician'],
-    physiotherapist: ['physiotherapist', 'dpt', 'physio'],
-    dentist: ['dentist', 'bds', 'orthodontist', 'oral surgeon', 'dental surgeon'],
-    radiology: ['radiographer', 'x-ray', 'mri', 'ct scan', 'sonographer', 'ultrasound', 'imaging'],
-    ot: ['ot technician', 'operation theater', 'surgical technologist', 'ot tech'],
-    paramedic: ['paramedic', 'emt', 'emergency medical', 'rescue'],
-    admin: ['receptionist', 'admin', 'administrator', 'front desk', 'hospital admin'],
-    ward: ['ward boy', 'ward attendant', 'hospital attendant', 'patient care']
-};
-
-const getGroup = (cat) => {
-    const cleaned = cat.toLowerCase().trim();
-    for (const [group, keywords] of Object.entries(categoryGroups)) {
-        // Word boundary check — "nurse" should not match "nursery"
-        if (keywords.some(kw => {
-            const kwClean = kw.trim();
-            return cleaned === kwClean || 
-                   cleaned.startsWith(kwClean + ' ') || 
-                   cleaned.endsWith(' ' + kwClean) || 
-                   cleaned.includes(' ' + kwClean + ' ');
-        })) return group;
-    }
-    return null;
-};
-
-        const userGroup = getGroup(userCategory);
-        const postGroup = getGroup(postCategoryLower);
-
-        if (userGroup && postGroup && userGroup === postGroup) {
-            categoryMatch = true;
-        }
-    }
-}
-
-                let locationMatch = false;
-                if (userLocation && postLocationLower) {
-                    if (userLocation === postLocationLower) locationMatch = true;
-                    else if (userLocation.includes(postLocationLower) || postLocationLower.includes(userLocation)) locationMatch = true;
-                }
-
-               if (!categoryMatch) continue;
-if (postLocationLower && userLocation && !locationMatch) continue;
-
-// ✅ Duplicate check — Set se (0 extra reads)
+                // Duplicate check
                 if (alreadySentUsers.has(userId)) continue;
 
-                const userProfilePic = user.profilePic || user.photoURL || '';
-                const userName = user.name || user.displayName || 'User';
+                // ── CATEGORY MATCHING ──────────────────────────
+                const userCategory = (user.category || user.profession || user.qualification || '').toLowerCase().trim();
+                let categoryMatch = false;
 
+                if (userCategory && postCategoryLower) {
+                    if (userCategory === postCategoryLower) {
+                        categoryMatch = true;
+                    } else {
+                        const userGroup = getCategoryGroup(userCategory);
+                        if (userGroup && effectivePostGroup && userGroup === effectivePostGroup) {
+                            categoryMatch = true;
+                        }
+                        // Also try matching user category against post title keywords
+                        if (!categoryMatch && postTitleLower) {
+                            const userGroupForTitle = getCategoryGroup(userCategory);
+                            if (userGroupForTitle && postTitleGroup && userGroupForTitle === postTitleGroup) {
+                                categoryMatch = true;
+                            }
+                        }
+                    }
+                }
+
+                if (!categoryMatch) continue;
+
+                // ── LOCATION MATCHING ──────────────────────────
+                const userLocation = (user.city || user.location || '').toLowerCase().trim();
+                const postLocationLower = (location || '').toLowerCase().trim();
+
+                if (postLocationLower && userLocation) {
+                    if (!locationsMatch(postLocationLower, userLocation)) continue;
+                }
+
+                // ── BUILD & SEND EMAIL ─────────────────────────
+                const userName = user.name || user.displayName || 'User';
                 const rows = [
                     { label: '🏥 Category', value: category },
                     { label: '📍 Location', value: location || 'N/A' },
-{ label: '💰 Salary', value: formatSalary(salary) }
+                    { label: '💰 Salary', value: formatSalary(salary) }
                 ];
 
-                const isJob = isEmployerPost;
                 const html = buildAlertEmail({
                     userName,
-                    userProfilePic,
-                    posterName: realPosterName,
-                    posterPic: realPosterPic,
-                    badgeLabel: isJob ? '💼 New Job' : '👨‍⚕️ New Candidate',
-                    badgeColor: isJob ? '#1d4ed8' : '#166534',
-                    badgeBg: isJob ? '#dbeafe' : '#dcfce7',
+                    badgeLabel: isEmployerPost ? '💼 New Job Post' : '👨‍⚕️ New Candidate',
                     title: title || category,
                     rows,
                     ctaUrl: postUrl,
-                    ctaText: isJob ? 'View Job Post' : 'View Candidate',
-                    footerNote: 'You received this because your profile matches this post.'
+                    isJob: isEmployerPost,
+                    posterName: realPosterName
                 });
 
-                const subject = isJob ? `New Job: ${title || category}` : `New Candidate: ${title || category}`;
+                const subject = isEmployerPost
+                    ? `New Job: ${title || category} in ${location || 'Pakistan'}`
+                    : `New Candidate: ${title || category}`;
 
                 const result = await sendEmail({
                     to: user.email, toName: userName, subject, html
                 });
 
-                // ✅ Sirf success pe log karo
                 if (result.success) {
                     sent++;
                     try {
@@ -557,7 +616,6 @@ app.get('/api/expiry-warning', async (req, res) => {
     try {
         const now = new Date();
         const in24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-
         const allPosts = await db.collection('posts').get();
 
         if (allPosts.empty) {
@@ -565,7 +623,6 @@ app.get('/api/expiry-warning', async (req, res) => {
         }
 
         let warned = 0;
-
         for (const doc of allPosts.docs) {
             const post = doc.data();
             const postId = doc.id;
@@ -577,8 +634,6 @@ app.get('/api/expiry-warning', async (req, res) => {
 
             let posterEmail = null;
             let posterName = '';
-            let posterPic = '';
-
             if (post.posterId) {
                 try {
                     const userDoc = await db.collection('users').doc(post.posterId).get();
@@ -586,7 +641,6 @@ app.get('/api/expiry-warning', async (req, res) => {
                         const userData = userDoc.data();
                         posterEmail = userData.email || null;
                         posterName = userData.name || userData.displayName || '';
-                        posterPic = userData.profilePic || userData.photoURL || '';
                     }
                 } catch (e) {
                     console.error('User fetch error:', e.message);
@@ -601,10 +655,8 @@ app.get('/api/expiry-warning', async (req, res) => {
 
             const html = buildExpiryEmail({
                 posterName: posterName || 'User',
-                posterPic,
                 postTitle: post.title || 'Untitled Post',
-                expiryDate,
-                postId
+                expiryDate
             });
 
             const result = await sendEmail({
@@ -635,7 +687,7 @@ app.get('/', (req, res) => {
     res.json({
         status: 'ok',
         service: 'Health Jobs Mail Server',
-        version: '9.0.0',
+        version: '10.0.0',
         endpoint: 'POST /api/send-notification',
         types: ['welcome', 'job-alert', 'new-post'],
         cron: 'GET /api/expiry-warning'
