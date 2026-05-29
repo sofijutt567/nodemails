@@ -85,7 +85,7 @@ function formatSalary(salary) {
 }
 
 // ============================================
-// CATEGORY GROUPS (Improved Matching)
+// CATEGORY GROUPS
 // ============================================
 const categoryGroups = {
     doctor: [
@@ -108,7 +108,6 @@ const categoryGroups = {
         'blood bank', 'phlebotomist', 'lab tech', 'medical lab',
         'clinical lab', 'pathology technician'
     ],
-    // Dispenser group — compounder, ward boy, pharmacy technician sab yahan
     dispenser: [
         'dispenser', 'compounder', 'pharmacy technician',
         'ward boy', 'ward attendant', 'hospital attendant',
@@ -162,9 +161,8 @@ function getCategoryGroup(cat) {
 }
 
 // ============================================
-// LOCATION MATCHING (City / District level)
+// LOCATION MATCHING
 // ============================================
-// Major cities and their common aliases / nearby areas
 const locationAliases = {
     lahore: ['lahore', 'lhr', 'lahore city', 'model town', 'gulberg', 'johar town', 'dha lahore'],
     karachi: ['karachi', 'khi', 'karachi city', 'clifton', 'defence karachi', 'korangi', 'gulshan'],
@@ -175,7 +173,7 @@ const locationAliases = {
     peshawar: ['peshawar', 'pew', 'peshawar city'],
     quetta: ['quetta', 'uet', 'quetta city'],
     gujranwala: ['gujranwala', 'grw'],
-    sialkot: ['sialkot', 'skт'],
+    sialkot: ['sialkot'],
     hyderabad: ['hyderabad', 'hyd', 'hyderabad city'],
     abbottabad: ['abbottabad', 'abb'],
     bahawalpur: ['bahawalpur', 'bwp'],
@@ -198,7 +196,6 @@ const locationAliases = {
     jhelum: ['jhelum'],
     attock: ['attock', 'campbellpur'],
     mandi: ['mandi bahauddin', 'mandi'],
-    narowal: ['narowal'],
     vehari: ['vehari'],
     lodhran: ['lodhran'],
     pakpattan: ['pakpattan'],
@@ -216,16 +213,14 @@ function getLocationGroup(loc) {
     for (const [city, aliases] of Object.entries(locationAliases)) {
         if (aliases.some(a => cleaned.includes(a) || a.includes(cleaned))) return city;
     }
-    // fallback: return cleaned as-is for generic includes check
     return cleaned;
 }
 
 function locationsMatch(postLoc, userLoc) {
-    if (!postLoc || !userLoc) return true; // if either missing, don't filter
+    if (!postLoc || !userLoc) return true;
     const pGroup = getLocationGroup(postLoc);
     const uGroup = getLocationGroup(userLoc);
     if (!pGroup || !uGroup) {
-        // fallback to basic includes
         const p = postLoc.toLowerCase().trim();
         const u = userLoc.toLowerCase().trim();
         return p === u || p.includes(u) || u.includes(p);
@@ -249,20 +244,11 @@ function buildHeader() {
 }
 
 // ============================================
-// SHARED FOOTER (No social icons, with links)
+// SHARED FOOTER (No emojis, no Android button, Powered by Sufian XR)
 // ============================================
 function buildFooter() {
     return `
     <div style="padding:20px 32px;text-align:center;border-top:1px solid #e8ecf1;background:#f8fafc;">
-      <p style="font-size:12px;color:#374151;margin:0 0 6px;font-weight:600;">📱 Download the App</p>
-      <p style="font-size:11px;color:#64748b;margin:0 0 10px;line-height:1.5;">
-        Get real-time job alerts on the go.
-      </p>
-      <a href="https://apkpure.com/p/com.sufian.healthjobs"
-         target="_blank"
-         style="display:inline-block;padding:9px 22px;background:#0f172a;color:#ffffff;text-decoration:none;border-radius:6px;font-size:12px;font-weight:600;margin-bottom:16px;">
-        ⬇ Download Android App
-      </a>
       <div style="border-top:1px solid #e8ecf1;padding-top:14px;margin-top:4px;">
         <p style="font-size:11px;color:#94a3b8;margin:0 0 8px;">
           <a href="https://healthjobportal.com/terms.html" style="color:#64748b;text-decoration:none;">Terms of Service</a>
@@ -271,13 +257,14 @@ function buildFooter() {
           &nbsp;·&nbsp;
           <a href="https://healthjobportal.com/about.html" style="color:#64748b;text-decoration:none;">About Us</a>
         </p>
-        <p style="font-size:11px;color:#b0b8c1;margin:0;">© 2026 Health Jobs Portal · Pakistan's #1 Digital Healthcare Network</p>
+        <p style="font-size:11px;color:#b0b8c1;margin:0 0 4px;">© 2026 Health Jobs Portal · Pakistan's #1 Digital Healthcare Network</p>
+        <p style="font-size:10px;color:#cbd5e1;margin:0;">Powered by Sufian XR</p>
       </div>
     </div>`;
 }
 
 // ============================================
-// WELCOME EMAIL TEMPLATE (Indeed style)
+// WELCOME EMAIL TEMPLATE
 // ============================================
 function buildWelcomeEmail({ name }) {
     return `<!DOCTYPE html>
@@ -285,7 +272,7 @@ function buildWelcomeEmail({ name }) {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Welcome – Health Jobs Portal</title>
+  <title>Welcome - Health Jobs Portal</title>
 </head>
 <body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;">
   <div style="max-width:560px;margin:28px auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
@@ -298,7 +285,7 @@ function buildWelcomeEmail({ name }) {
         find qualified medical professionals.
       </p>
       <p style="margin:0 0 20px;font-size:13px;color:#374151;line-height:1.7;">
-        We'll notify you by email when new jobs matching your profile become available.
+        We will notify you by email when new jobs matching your profile become available.
       </p>
       <div style="text-align:left;">
         <a href="https://healthjobportal.com/index.html"
@@ -314,7 +301,7 @@ function buildWelcomeEmail({ name }) {
 }
 
 // ============================================
-// NEW POST ALERT EMAIL TEMPLATE (Indeed style)
+// NEW POST ALERT EMAIL TEMPLATE
 // ============================================
 function buildAlertEmail({ userName, badgeLabel, title, rows, ctaUrl, isJob, posterName }) {
     const detailRows = rows.map(r => `
@@ -345,7 +332,7 @@ function buildAlertEmail({ userName, badgeLabel, title, rows, ctaUrl, isJob, pos
 
       <p style="margin:0 0 18px;font-size:13px;color:#374151;line-height:1.7;">
         ${isJob
-            ? `A new job has been posted that matches your profile. Review the details and apply if you're interested.`
+            ? `A new job has been posted that matches your profile. Review the details and apply if you are interested.`
             : `A new candidate profile has been posted that matches your requirements.`
         }
       </p>
@@ -367,7 +354,7 @@ function buildAlertEmail({ userName, badgeLabel, title, rows, ctaUrl, isJob, pos
 }
 
 // ============================================
-// EXPIRY WARNING EMAIL TEMPLATE (Indeed style)
+// EXPIRY WARNING EMAIL TEMPLATE
 // ============================================
 function buildExpiryEmail({ posterName, postTitle, expiryDate }) {
     return `<!DOCTYPE html>
@@ -381,15 +368,15 @@ function buildExpiryEmail({ posterName, postTitle, expiryDate }) {
   <div style="max-width:560px;margin:28px auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
     ${buildHeader()}
     <div style="padding:24px 32px 28px;">
-      <p style="margin:0 0 4px;font-size:11px;color:#dc2626;text-transform:uppercase;letter-spacing:0.5px;">⚠ Post Expiring Soon</p>
+      <p style="margin:0 0 4px;font-size:11px;color:#dc2626;text-transform:uppercase;letter-spacing:0.5px;">Post Expiring Soon</p>
       <p style="margin:0 0 16px;font-size:15px;font-weight:700;color:#111827;line-height:1.4;">${postTitle}</p>
       <p style="margin:0 0 14px;font-size:13px;color:#374151;line-height:1.7;">
         Hello ${posterName}, your post will expire in the next <strong style="color:#dc2626;">24 hours</strong>.
         Please publish a new post to stay visible to candidates across Pakistan.
       </p>
       <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:20px;">
-        <tr><td style="padding:5px 0;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6;">⏰ Expires at &nbsp;<span style="color:#dc2626;font-weight:600;">${expiryDate}</span></td></tr>
-        <tr><td style="padding:5px 0;font-size:13px;color:#374151;">✅ Action &nbsp;<span style="color:#166534;font-weight:600;">Publish a new post to stay active</span></td></tr>
+        <tr><td style="padding:5px 0;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6;">Expires at &nbsp;<span style="color:#dc2626;font-weight:600;">${expiryDate}</span></td></tr>
+        <tr><td style="padding:5px 0;font-size:13px;color:#374151;">Action &nbsp;<span style="color:#166534;font-weight:600;">Publish a new post to stay active</span></td></tr>
       </table>
       <div>
         <a href="https://healthjobportal.com"
@@ -415,7 +402,7 @@ app.post('/api/send-notification', async (req, res) => {
             jobTitle, jobLocation, jobLink, matchScore
         } = req.body;
 
-        // ── TYPE 1: WELCOME EMAIL ──────────────────────────────
+        // TYPE 1: WELCOME EMAIL
         if (type === 'welcome') {
             if (!email || !name) {
                 return res.status(400).json({ success: false, error: 'Email and name required' });
@@ -431,20 +418,20 @@ app.post('/api/send-notification', async (req, res) => {
                 : res.status(500).json({ success: false, error: result.error });
         }
 
-        // ── TYPE 2: JOB ALERT (Single User) ───────────────────
+        // TYPE 2: JOB ALERT (Single User)
         if (type === 'job-alert') {
             if (!email || !name || !jobTitle) {
                 return res.status(400).json({ success: false, error: 'Email, name, jobTitle required' });
             }
             const rows = [
-                { label: '💼 Position', value: jobTitle },
-                { label: '📍 Location', value: jobLocation || 'Pakistan' }
+                { label: 'Position', value: jobTitle },
+                { label: 'Location', value: jobLocation || 'Pakistan' }
             ];
-            if (matchScore) rows.push({ label: '🎯 Match', value: matchScore + '%' });
+            if (matchScore) rows.push({ label: 'Match', value: matchScore + '%' });
 
             const html = buildAlertEmail({
                 userName: name,
-                badgeLabel: '🔔 New Job Alert',
+                badgeLabel: 'New Job Alert',
                 title: jobTitle,
                 rows,
                 ctaUrl: jobLink || 'https://healthjobportal.com',
@@ -461,7 +448,7 @@ app.post('/api/send-notification', async (req, res) => {
                 : res.status(500).json({ success: false, error: result.error });
         }
 
-        // ── TYPE 3: NEW POST ALERT (Matched Users) ────────────
+        // TYPE 3: NEW POST ALERT (Matched Users)
         if (type === 'new-post') {
             if (!postId || !category) {
                 return res.status(400).json({ success: false, message: 'postId and category required.' });
@@ -474,21 +461,19 @@ app.post('/api/send-notification', async (req, res) => {
 
             // Fetch poster info
             let realPosterName = posterName || 'Health Jobs User';
-            let realPosterPic = '';
             if (posterId) {
                 try {
                     const posterDoc = await db.collection('users').doc(posterId).get();
                     if (posterDoc.exists) {
                         const d = posterDoc.data();
                         realPosterName = d.fullName || d.facilityName || d.name || d.displayName || posterName || 'Health Jobs User';
-                        realPosterPic = d.profilePicUrl || d.profilePic || d.photoURL || '';
                     }
                 } catch (e) {
                     console.error('Poster fetch error:', e.message);
                 }
             }
 
-            // Fetch already-sent logs (duplicate prevention)
+            // Fetch already-sent logs
             const logsSnap = await db.collection('email_logs')
                 .where('postId', '==', postId)
                 .get();
@@ -504,9 +489,7 @@ app.post('/api/send-notification', async (req, res) => {
             const postCategoryLower = category.toLowerCase().trim();
             const postTitleLower = (title || '').toLowerCase().trim();
             const postCatGroup = getCategoryGroup(postCategoryLower);
-            // Also check title for category group
             const postTitleGroup = getCategoryGroup(postTitleLower);
-            // Use whichever group we found
             const effectivePostGroup = postCatGroup || postTitleGroup;
 
             for (const userDoc of usersSnap.docs) {
@@ -516,15 +499,13 @@ app.post('/api/send-notification', async (req, res) => {
                 if (!user.email) continue;
                 if (userId === posterId) continue;
 
-                // Role filter
                 const userRole = (user.role || user.userType || user.accountType || '').toLowerCase();
                 if (isEmployerPost && userRole === 'employer') continue;
                 if (!isEmployerPost && userRole === 'candidate') continue;
 
-                // Duplicate check
                 if (alreadySentUsers.has(userId)) continue;
 
-                // ── CATEGORY MATCHING ──────────────────────────
+                // Category matching
                 const userCategory = (user.category || user.profession || user.qualification || '').toLowerCase().trim();
                 let categoryMatch = false;
 
@@ -536,7 +517,6 @@ app.post('/api/send-notification', async (req, res) => {
                         if (userGroup && effectivePostGroup && userGroup === effectivePostGroup) {
                             categoryMatch = true;
                         }
-                        // Also try matching user category against post title keywords
                         if (!categoryMatch && postTitleLower) {
                             const userGroupForTitle = getCategoryGroup(userCategory);
                             if (userGroupForTitle && postTitleGroup && userGroupForTitle === postTitleGroup) {
@@ -548,7 +528,7 @@ app.post('/api/send-notification', async (req, res) => {
 
                 if (!categoryMatch) continue;
 
-                // ── LOCATION MATCHING ──────────────────────────
+                // Location matching
                 const userLocation = (user.city || user.location || '').toLowerCase().trim();
                 const postLocationLower = (location || '').toLowerCase().trim();
 
@@ -556,17 +536,16 @@ app.post('/api/send-notification', async (req, res) => {
                     if (!locationsMatch(postLocationLower, userLocation)) continue;
                 }
 
-                // ── BUILD & SEND EMAIL ─────────────────────────
                 const userName = user.name || user.displayName || 'User';
                 const rows = [
-                    { label: '🏥 Category', value: category },
-                    { label: '📍 Location', value: location || 'N/A' },
-                    { label: '💰 Salary', value: formatSalary(salary) }
+                    { label: 'Category', value: category },
+                    { label: 'Location', value: location || 'N/A' },
+                    { label: 'Salary', value: formatSalary(salary) }
                 ];
 
                 const html = buildAlertEmail({
                     userName,
-                    badgeLabel: isEmployerPost ? '💼 New Job Post' : '👨‍⚕️ New Candidate',
+                    badgeLabel: isEmployerPost ? 'New Job Post' : 'New Candidate',
                     title: title || category,
                     rows,
                     ctaUrl: postUrl,
@@ -630,48 +609,71 @@ app.get('/api/expiry-warning', async (req, res) => {
             if (!post.expiresAt || post.expiryEmailSent === true) continue;
 
             const expiryTime = new Date(post.expiresAt).getTime();
+            if (isNaN(expiryTime)) {
+                console.log(`Post ${postId}: invalid expiresAt value:`, post.expiresAt);
+                continue;
+            }
             if (expiryTime <= now.getTime() || expiryTime > in24h.getTime()) continue;
 
+            // Fetch poster info — check all possible name fields
             let posterEmail = null;
-            let posterName = '';
-            if (post.posterId) {
+            let posterName = 'User';
+
+            const posterIdField = post.posterId || post.userId || post.uid || null;
+            console.log(`Post ${postId}: posterIdField =`, posterIdField);
+
+            if (posterIdField) {
                 try {
-                    const userDoc = await db.collection('users').doc(post.posterId).get();
+                    const userDoc = await db.collection('users').doc(posterIdField).get();
                     if (userDoc.exists) {
                         const userData = userDoc.data();
                         posterEmail = userData.email || null;
-                        posterName = userData.name || userData.displayName || '';
+                        posterName = userData.fullName || userData.facilityName || userData.name || userData.displayName || 'User';
+                        console.log(`Post ${postId}: posterEmail = ${posterEmail}, posterName = ${posterName}`);
+                    } else {
+                        console.log(`Post ${postId}: user doc not found for id:`, posterIdField);
                     }
                 } catch (e) {
-                    console.error('User fetch error:', e.message);
+                    console.error(`Post ${postId}: user fetch error:`, e.message);
                 }
+            } else {
+                // posterId missing — try using email directly on the post doc
+                posterEmail = post.email || post.posterEmail || null;
+                posterName = post.posterName || post.name || 'User';
+                console.log(`Post ${postId}: no posterId, using post-level email:`, posterEmail);
             }
 
-            if (!posterEmail) continue;
+            if (!posterEmail) {
+                console.log(`Post ${postId}: skipped — no email found`);
+                continue;
+            }
 
             const expiryDate = new Date(post.expiresAt).toLocaleString('en-PK', {
                 timeZone: 'Asia/Karachi', dateStyle: 'medium', timeStyle: 'short'
             });
 
             const html = buildExpiryEmail({
-                posterName: posterName || 'User',
+                posterName,
                 postTitle: post.title || 'Untitled Post',
                 expiryDate
             });
 
             const result = await sendEmail({
                 to: posterEmail, toName: posterName,
-                subject: `⚠️ Your Post Expires Soon: ${post.title || 'Untitled'}`,
+                subject: `Your Post Expires Soon: ${post.title || 'Untitled'}`,
                 html
             });
 
             if (result.success) {
                 await db.collection('posts').doc(postId).update({ expiryEmailSent: true });
                 warned++;
+                console.log(`Post ${postId}: expiry warning sent to ${posterEmail}`);
+            } else {
+                console.log(`Post ${postId}: email failed:`, result.error);
             }
         }
 
-        console.log(`Warnings: ${warned}`);
+        console.log(`Warnings sent: ${warned}`);
         return res.json({ success: true, warned, message: `${warned} warnings sent.` });
 
     } catch (err) {
@@ -687,7 +689,7 @@ app.get('/', (req, res) => {
     res.json({
         status: 'ok',
         service: 'Health Jobs Mail Server',
-        version: '10.0.0',
+        version: '11.0.0',
         endpoint: 'POST /api/send-notification',
         types: ['welcome', 'job-alert', 'new-post'],
         cron: 'GET /api/expiry-warning'
