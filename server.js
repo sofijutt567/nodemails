@@ -244,7 +244,7 @@ function buildHeader() {
 }
 
 // ============================================
-// SHARED FOOTER (No emojis, no Android button, Powered by Sufian XR)
+// SHARED FOOTER (No emojis, no Android button, Powered by Sufian X)
 // ============================================
 function buildFooter() {
     return `
@@ -253,12 +253,12 @@ function buildFooter() {
         <p style="font-size:11px;color:#94a3b8;margin:0 0 8px;">
           <a href="https://healthjobportal.com/terms.html" style="color:#64748b;text-decoration:none;">Terms of Service</a>
           &nbsp;·&nbsp;
-          <a href="https://healthjobportal.com/privacy.html" style="color:#64748b;text-decoration:none;">Privacy Policy</a>
+          <a href="https://healthjobportal.com/privcy.html" style="color:#64748b;text-decoration:none;">Privacy Policy</a>
           &nbsp;·&nbsp;
           <a href="https://healthjobportal.com/about.html" style="color:#64748b;text-decoration:none;">About Us</a>
         </p>
         <p style="font-size:11px;color:#b0b8c1;margin:0 0 4px;">© 2026 Health Jobs Portal · Pakistan's #1 Digital Healthcare Network</p>
-        <p style="font-size:10px;color:#cbd5e1;margin:0;">Powered by Sufian XR</p>
+        <p style="font-size:10px;color:#cbd5e1;margin:0;">Powered by Sufian X</p>
       </div>
     </div>`;
 }
