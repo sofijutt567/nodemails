@@ -10,7 +10,13 @@ app.use(express.json());
 // ============================================
 // ADMIN NOTIFICATION SETTINGS
 // ============================================
-const ADMIN_EMAIL = "supporthealthjobs@gmail.com";
+// Admin alerts (new employer signups, appeals) go here.
+// Set ADMIN_EMAIL in Vercel env vars to change it without a redeploy.
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "supporthealthjobs@gmail.com";
+// Extra recipients (comma-separated) — every admin alert is also copied here.
+// sufiangsufiang50@gmail.com is included so the owner gets every signup too.
+const ADMIN_EMAILS_EXTRA = (process.env.ADMIN_EMAILS_EXTRA || "sufiangsufiang50@gmail.com")
+    .split(',').map(s => s.trim()).filter(Boolean);
 // Update this once the admin panel is deployed (e.g. https://healthjobportal.com/admin.html)
 const ADMIN_PANEL_URL = process.env.ADMIN_PANEL_URL || "https://healthjobportal.com/admin.html";
 
@@ -43,42 +49,96 @@ if (!admin.apps.length) {
 // ============================================
 // BREVO EMAIL SENDER
 // ============================================
+const EMAIL_TIMEOUT_MS = 10000;
+const EMAIL_MAX_RETRIES = 2; // 1 initial attempt + 2 retries
+// Waits between retries (exponential backoff), so a transient Brevo 5xx or a
+// network blip does not silently drop a notification.
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+function isEmailConfigured() {
+    const apiKey = process.env.BREVO_API_KEY;
+    const fromEmail = process.env.FROM_EMAIL || process.env.SENDER_EMAIL;
+    return !!(apiKey && fromEmail);
+}
+
 async function sendEmail({ to, toName, subject, html }) {
-    try {
-        const apiKey = process.env.BREVO_API_KEY;
-        const fromEmail = process.env.FROM_EMAIL || process.env.SENDER_EMAIL;
-        const fromName = process.env.FROM_NAME || 'Health Jobs Portal';
+    const apiKey = process.env.BREVO_API_KEY;
+    const fromEmail = process.env.FROM_EMAIL || process.env.SENDER_EMAIL;
+    const fromName = process.env.FROM_NAME || 'Health Jobs Portal';
 
-        if (!apiKey || !fromEmail) {
-            return { success: false, error: 'Server config error' };
-        }
-
-        const response = await fetch('https://api.brevo.com/v3/smtp/email', {
-            method: 'POST',
-            headers: {
-                'Accept': 'application/json',
-                'Content-Type': 'application/json',
-                'api-key': apiKey
-            },
-            body: JSON.stringify({
-                sender: { name: fromName, email: fromEmail },
-                to: [{ email: to, name: toName || '' }],
-                subject: subject,
-                htmlContent: html
-            })
-        });
-
-        const result = await response.json();
-        if (!response.ok) {
-            console.error('Brevo error:', result.message);
-            return { success: false, error: result.message };
-        }
-        console.log('Email sent to:', to);
-        return { success: true };
-    } catch (err) {
-        console.error('Email failed:', err.message);
-        return { success: false, error: err.message };
+    if (!apiKey || !fromEmail) {
+        console.error('[email] config missing: BREVO_API_KEY or FROM_EMAIL not set');
+        return { success: false, error: 'Server config error: missing BREVO_API_KEY or FROM_EMAIL' };
     }
+    if (!to || !String(to).includes('@')) {
+        console.error('[email] invalid recipient skipped:', JSON.stringify(to));
+        return { success: false, error: `Invalid recipient: ${to}` };
+    }
+
+    let lastError = 'Unknown error';
+
+    for (let attempt = 1; attempt <= EMAIL_MAX_RETRIES + 1; attempt++) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), EMAIL_TIMEOUT_MS);
+        try {
+            const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+                method: 'POST',
+                headers: {
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'api-key': apiKey
+                },
+                body: JSON.stringify({
+                    sender: { name: fromName, email: fromEmail },
+                    to: [{ email: to, name: toName || '' }],
+                    subject: subject,
+                    htmlContent: html
+                }),
+                signal: controller.signal
+            });
+
+            const result = await response.json().catch(() => ({}));
+            clearTimeout(timer);
+
+            if (response.ok) {
+                console.log(`[email] sent to ${to} (attempt ${attempt})`);
+                return { success: true };
+            }
+
+            lastError = result.message || result.error || `HTTP ${response.status}`;
+            console.error(`[email] Brevo rejected ${to} (attempt ${attempt}): ${lastError}`);
+
+            // 4xx (except 429) means the request itself is wrong — retrying won't help.
+            if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+                return { success: false, error: lastError, status: response.status };
+            }
+        } catch (err) {
+            clearTimeout(timer);
+            lastError = err.name === 'AbortError' ? 'Request timed out' : err.message;
+            console.error(`[email] attempt ${attempt} failed for ${to}: ${lastError}`);
+        }
+
+        if (attempt <= EMAIL_MAX_RETRIES) await sleep(400 * attempt);
+    }
+
+    return { success: false, error: lastError };
+}
+
+// Every admin alert goes to the primary admin address AND the extra recipients.
+// Resolves once all sends settle; never throws (caller should not fail because of it).
+async function sendAdminEmail({ subject, html, toName }) {
+    const recipients = [ADMIN_EMAIL, ...ADMIN_EMAILS_EXTRA].filter(Boolean);
+    const results = await Promise.allSettled(
+        recipients.map(to => sendEmail({ to, toName: toName || 'Admin', subject, html }))
+    );
+    const failed = [];
+    results.forEach((r, i) => {
+        if (r.status === 'rejected' || !r.value || !r.value.success) {
+            failed.push(recipients[i]);
+        }
+    });
+    if (failed.length) console.error('[email] admin alert failed for:', failed.join(', '));
+    return { recipients, failed };
 }
 
 // ============================================
@@ -238,16 +298,99 @@ function locationsMatch(postLoc, userLoc) {
 // ============================================
 // SHARED HEADER
 // ============================================
+const FONT_STACK = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif";
+
+// Brand palette (kept consistent across every template)
+const BRAND = {
+    ink: '#0f172a',      // headings
+    body: '#475569',     // body text
+    muted: '#94a3b8',    // fine print
+    line: '#e8ecf1',     // hairlines
+    primary: '#1d4ed8',  // action blue
+    ok: '#15803d',       // approved
+    okBg: '#f0fdf4',
+    okLine: '#bbf7d0',
+    warn: '#b45309',     // under review
+    warnBg: '#fffbeb',
+    warnLine: '#fde68a',
+    bad: '#b91c1c',      // rejected
+    badBg: '#fef2f2',
+    badLine: '#fecaca',
+};
+
 function buildHeader() {
     return `
-    <div style="padding:20px 32px;text-align:center;border-bottom:1px solid #e8ecf1;background:#ffffff;">
+    <div style="padding:22px 32px;text-align:center;border-bottom:1px solid ${BRAND.line};background:#ffffff;">
       <a href="https://healthjobportal.com" style="text-decoration:none;display:inline-block;">
         <img src="https://healthjobportal.com/images/logo.png"
              alt="Health Jobs Portal"
-             height="44"
-             style="height:44px;width:auto;display:inline-block;border:0;" />
+             height="42"
+             style="height:42px;width:auto;display:inline-block;border:0;" />
       </a>
     </div>`;
+}
+
+// Page shell — every email shares this so spacing/width/font stay identical.
+// bodyContent is the inner HTML of the content block.
+function buildShell({ title, bodyContent }) {
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+ <meta charset="UTF-8" />
+ <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+ <meta name="x-apple-disable-message-reformatting" />
+ <title>${title}</title>
+ <style>
+    @media only screen and (max-width:600px) {
+      .hjp-container { width:100% !important; border-radius:0 !important; margin:0 !important; }
+      .hjp-pad { padding-left:20px !important; padding-right:20px !important; }
+      .hjp-h1 { font-size:17px !important; }
+    }
+ </style>
+</head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:${FONT_STACK};-webkit-font-smoothing:antialiased;">
+ <div class="hjp-container" style="max-width:580px;margin:32px auto;background:#ffffff;border:1px solid ${BRAND.line};border-radius:10px;overflow:hidden;">
+    ${buildHeader()}
+    <div class="hjp-pad" style="padding:34px 36px;">
+      ${bodyContent}
+    </div>
+    ${buildFooter()}
+ </div>
+</body>
+</html>`;
+}
+
+// Small uppercase label used above the main heading ("Account Approved" etc.)
+function buildEyebrow(text, color) {
+    return `<p style="margin:0 0 6px;font-size:11px;font-weight:700;letter-spacing:0.8px;text-transform:uppercase;color:${color || BRAND.muted};">${text}</p>`;
+}
+
+// Primary page heading
+function buildHeading(text) {
+    return `<h1 class="hjp-h1" style="margin:0 0 18px;font-size:19px;line-height:1.35;font-weight:700;color:${BRAND.ink};">${text}</h1>`;
+}
+
+// Left-accent notice bar — replaces the old centered emoji boxes.
+function buildNotice({ text, tone }) {
+    const tones = {
+        ok:   { bg: BRAND.okBg,   line: BRAND.okLine,   accent: BRAND.ok,   color: '#14532d' },
+        warn: { bg: BRAND.warnBg, line: BRAND.warnLine, accent: '#d97706',  color: '#78350f' },
+        bad:  { bg: BRAND.badBg,  line: BRAND.badLine,  accent: '#dc2626',  color: '#7f1d1d' },
+    };
+    const t = tones[tone] || tones.warn;
+    return `<div style="background:${t.bg};border:1px solid ${t.line};border-left:3px solid ${t.accent};border-radius:6px;padding:14px 18px;margin:0 0 22px;">
+        <p style="margin:0;font-size:13px;line-height:1.65;color:${t.color};">${text}</p>
+      </div>`;
+}
+
+// Primary call-to-action button
+function buildButton({ href, label, color }) {
+    return `<a href="${href}" style="display:inline-block;padding:12px 28px;background:${color || BRAND.primary};color:#ffffff;text-decoration:none;border-radius:6px;font-size:13.5px;font-weight:600;">${label}</a>`;
+}
+
+// Secondary (outline) button
+function buildOutlineButton({ href, label }) {
+    return `<a href="${href}" style="display:inline-block;padding:11px 24px;background:#ffffff;color:${BRAND.primary};text-decoration:none;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;font-weight:600;">${label}</a>`;
 }
 
 // ============================================
@@ -255,7 +398,7 @@ function buildHeader() {
 // ============================================
 function buildFooter() {
     return `
-    <div style="padding:20px 32px;text-align:center;border-top:1px solid #e8ecf1;background:#f8fafc;">
+    <div style="padding:22px 32px;text-align:center;border-top:1px solid ${BRAND.line};background:#f8fafc;">
       <div style="padding-bottom:16px;">
         <a href="https://whatsapp.com/channel/0029VbCe3Mf2kNFroj9qx223" style="display:inline-block;margin:0 7px;text-decoration:none;" target="_blank">
           <img src="https://img.icons8.com/color/48/whatsapp--v1.png" width="26" height="26" alt="WhatsApp" style="display:block;border:0;" />
@@ -280,7 +423,7 @@ function buildFooter() {
           &nbsp;·&nbsp;
           <a href="https://healthjobportal.com/about.html" style="color:#64748b;text-decoration:none;">About Us</a>
         </p>
-        <p style="font-size:11px;color:#b0b8c1;margin:0 0 4px;">© 2026 Health Jobs Portal · Pakistan's #1 Digital Healthcare Network</p>
+        <p style="font-size:11px;color:#b0b8c1;margin:0 0 4px;">&copy; 2026 Health Jobs Portal &middot; Pakistan's #1 Digital Healthcare Network</p>
         <p style="font-size:10px;color:#cbd5e1;margin:0;">Powered by Sufian X</p>
       </div>
     </div>`;
@@ -292,10 +435,19 @@ function buildFooter() {
 function buildDetailRows(rows) {
     return rows.map(r => `
       <tr>
-        <td style="padding:6px 0;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6;line-height:1.5;">
-          ${r.label}&nbsp; <span style="color:#111827;font-weight:600;">${r.value}</span>
+        <td style="padding:9px 0;font-size:13px;color:${BRAND.body};border-bottom:1px solid #f1f5f9;line-height:1.5;">
+          ${r.label}
+          <span style="float:right;color:${BRAND.ink};font-weight:600;text-align:right;">${r.value}</span>
         </td>
       </tr>`).join('');
+}
+
+// Bordered summary table wrapper for the detail rows
+function buildDetailTable(rows, marginBottom) {
+    if (!rows || !rows.length) return '';
+    return `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:${marginBottom || '24px'};">
+        ${buildDetailRows(rows)}
+      </table>`;
 }
 
 // ============================================
@@ -324,62 +476,37 @@ function buildWelcomeEmail({
             ...(contactPhone ? [{ label: 'Phone', value: contactPhone }] : []),
           ];
 
-    const introText = isEmployer
-        ? `Your facility account on <strong>Health Jobs Portal</strong> has been created successfully. Below is a summary of the details you submitted.`
-        : `Your candidate account on <strong>Health Jobs Portal</strong> has been created successfully. You can now browse and apply for healthcare jobs across Pakistan.`;
+        const introText = isEmployer
+            ? `Your facility account on <strong>Health Jobs Portal</strong> has been created successfully. A summary of the details you submitted is shown below.`
+            : `Your candidate account on <strong>Health Jobs Portal</strong> has been created successfully. You can now browse and apply for healthcare jobs across Pakistan.`;
 
-    const reviewNotice = isEmployer ? `
-      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:12px 16px;margin:0 0 20px;">
-        <p style="margin:0;font-size:12.5px;color:#92400e;line-height:1.6;">
-          <strong>Under Review:</strong> Your facility account is currently being reviewed by our team.
-          Once approved, you'll be able to post jobs and your facility will be visible to candidates —
-          this usually takes less than 24 hours. We'll email you as soon as it's approved.
-        </p>
-      </div>` : '';
+        const reviewNotice = isEmployer
+            ? buildNotice({
+                tone: 'warn',
+                text: `<strong style="color:#78350f;">Under Review</strong><br>Your facility account is currently being reviewed by our team. Once approved, you will be able to post jobs and your facility will be visible to candidates. This usually takes less than 24 hours, and we will email you as soon as it is approved.`
+              })
+            : '';
 
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Welcome - Health Jobs Portal</title>
-  <style>
-    @media only screen and (max-width:600px) {
-      .hjp-container { width:100% !important; border-radius:0 !important; }
-      .hjp-pad { padding-left:20px !important; padding-right:20px !important; }
+        const bodyContent = `
+          ${buildEyebrow(isEmployer ? 'Account Created' : 'Account Created')}
+          ${buildHeading(`Welcome to Health Jobs Portal, ${name}`)}
+
+          <p style="margin:0 0 22px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">${introText}</p>
+
+          ${reviewNotice}
+
+          ${rows.length ? `
+          <p style="margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${BRAND.muted};">Your Submitted Details</p>
+          ${buildDetailTable(rows, '26px')}` : ''}
+
+          <p style="margin:0 0 24px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+            You will be notified by email when ${isEmployer ? 'candidates matching your job posts' : 'new jobs matching your profile'} become available.
+          </p>
+
+          ${buildButton({ href: 'https://healthjobportal.com/index.html', label: 'Go to Dashboard' })}`;
+
+        return buildShell({ title: 'Welcome - Health Jobs Portal', bodyContent });
     }
-  </style>
-</head>
-<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;">
-  <div class="hjp-container" style="max-width:560px;margin:28px auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
-    ${buildHeader()}
-    <div class="hjp-pad" style="padding:28px 32px;">
-      <p style="margin:0 0 14px;font-size:15px;color:#111827;font-weight:600;">Welcome, ${name}!</p>
-      <p style="margin:0 0 18px;font-size:13px;color:#374151;line-height:1.7;">${introText}</p>
-
-      ${reviewNotice}
-
-      ${rows.length ? `
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:20px;">
-        ${buildDetailRows(rows)}
-      </table>` : ''}
-
-      <p style="margin:0 0 20px;font-size:13px;color:#374151;line-height:1.7;">
-        We will notify you by email when ${isEmployer ? 'candidates matching your job posts' : 'new jobs matching your profile'} become available.
-      </p>
-
-      <div style="text-align:left;">
-        <a href="https://healthjobportal.com/index.html"
-           style="display:inline-block;padding:10px 24px;background:#1d4ed8;color:#ffffff;text-decoration:none;border-radius:5px;font-size:13px;font-weight:600;">
-          Go to Dashboard
-        </a>
-      </div>
-    </div>
-    ${buildFooter()}
-  </div>
-</body>
-</html>`;
-}
 
 // ============================================
 // ADMIN NOTIFICATION EMAIL — new employer signup
@@ -396,282 +523,195 @@ function buildAdminNotifyEmail({ facilityName, email, facilityType, ownershipTyp
         ...(contactPhone ? [{ label: 'Contact Phone', value: contactPhone }] : []),
     ];
 
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>New Employer Approval Request</title>
-</head>
-<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;">
-  <div style="max-width:560px;margin:28px auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
-    ${buildHeader()}
-    <div style="padding:28px 32px;">
-      <p style="margin:0 0 4px;font-size:11px;color:#b45309;text-transform:uppercase;letter-spacing:0.5px;font-weight:700;">Approval Needed</p>
-      <p style="margin:0 0 16px;font-size:15px;font-weight:700;color:#111827;line-height:1.4;">New Employer Account Awaiting Review</p>
-      <p style="margin:0 0 18px;font-size:13px;color:#374151;line-height:1.7;">
-        A new facility account has just signed up and is waiting for your approval before it goes live.
-      </p>
+        const bodyContent = `
+          ${buildEyebrow('Approval Required', BRAND.warn)}
+          ${buildHeading('New Employer Account Awaiting Review')}
 
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:22px;">
-        ${buildDetailRows(rows)}
-      </table>
+          <p style="margin:0 0 22px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+            A new facility account has been registered and is awaiting your approval before it goes live.
+          </p>
 
-      <div style="text-align:left;">
-        <a href="${ADMIN_PANEL_URL}"
-           style="display:inline-block;padding:10px 24px;background:#1d4ed8;color:#ffffff;text-decoration:none;border-radius:5px;font-size:13px;font-weight:600;">
-          Review in Admin Panel
-        </a>
-      </div>
-    </div>
-    ${buildFooter()}
-  </div>
-</body>
-</html>`;
-}
+          <p style="margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${BRAND.muted};">Account Details</p>
+          ${buildDetailTable(rows, '26px')}
+
+          ${buildButton({ href: ADMIN_PANEL_URL, label: 'Review in Admin Panel' })}`;
+
+        return buildShell({ title: 'New Employer Approval Request', bodyContent });
+    }
 
 // ============================================
 // EMPLOYER APPROVAL DECISION EMAILS
 // ============================================
 function buildEmployerApprovedEmail({ name }) {
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Account Approved - Health Jobs Portal</title>
-</head>
-<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;">
-  <div style="max-width:560px;margin:28px auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
-    ${buildHeader()}
-    <div style="padding:28px 32px;">
+    const rows = [
+        { label: 'Post Jobs', value: 'Enabled' },
+        { label: 'Facility Profile Visibility', value: 'Active' },
+        { label: 'Job Alerts to Candidates', value: 'Active' },
+    ];
 
-      <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px 20px;margin-bottom:22px;text-align:center;">
-        <p style="margin:0 0 4px;font-size:28px;">✅</p>
-        <p style="margin:0;font-size:15px;font-weight:700;color:#166534;">Account Approved!</p>
-      </div>
+    const bodyContent = `
+      ${buildEyebrow('Account Approved', BRAND.ok)}
+      ${buildHeading('Your facility account has been approved')}
 
-      <p style="margin:0 0 14px;font-size:15px;color:#111827;font-weight:600;">Congratulations, ${name}!</p>
-      <p style="margin:0 0 18px;font-size:13px;color:#374151;line-height:1.7;">
-        Your facility account on <strong>Health Jobs Portal</strong> has been reviewed and approved by our team.
-        You can now post jobs and your facility profile is visible to candidates across Pakistan.
+      <p style="margin:0 0 20px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        Dear ${name},<br>
+        Your facility account on <strong>Health Jobs Portal</strong> has been reviewed and approved by our team. You can now post jobs, and your facility profile is visible to candidates across Pakistan.
       </p>
 
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:22px;">
-        <tr>
-          <td style="padding:7px 0;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6;">Post Jobs &nbsp;<span style="color:#16a34a;font-weight:600;">✓ Enabled</span></td>
-        </tr>
-        <tr>
-          <td style="padding:7px 0;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6;">Facility Profile Visible &nbsp;<span style="color:#16a34a;font-weight:600;">✓ Active</span></td>
-        </tr>
-        <tr>
-          <td style="padding:7px 0;font-size:13px;color:#374151;">Job Alerts to Candidates &nbsp;<span style="color:#16a34a;font-weight:600;">✓ Active</span></td>
-        </tr>
-      </table>
+      ${buildNotice({
+        tone: 'ok',
+        text: `<strong style="color:#14532d;">Your account is now active.</strong> The features below have been enabled and are ready to use.`
+      })}
 
-      <div style="text-align:left;">
-        <a href="https://healthjobportal.com/index.html"
-           style="display:inline-block;padding:11px 26px;background:#1d4ed8;color:#ffffff;text-decoration:none;border-radius:6px;font-size:13px;font-weight:600;">
-          Go to Dashboard
-        </a>
-      </div>
+      <p style="margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${BRAND.muted};">Enabled Features</p>
+      ${buildDetailTable(rows, '26px')}
 
-    </div>
-    ${buildFooter()}
-  </div>
-</body>
-</html>`;
+      ${buildButton({ href: 'https://healthjobportal.com/index.html', label: 'Go to Dashboard' })}`;
+
+    return buildShell({ title: 'Account Approved - Health Jobs Portal', bodyContent });
 }
 
 function buildEmployerRejectedEmail({ name, reason, uid }) {
     const appealUrl = `https://admiapproval.sufiangsufiang50.workers.dev/appeal?uid=${encodeURIComponent(uid || '')}`;
     const appealWhatsApp = 'https://wa.me/923141303160';
 
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Account Review Update - Health Jobs Portal</title>
-</head>
-<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;">
-  <div style="max-width:560px;margin:28px auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
-    ${buildHeader()}
-    <div style="padding:28px 32px;">
+    const reasonBlock = reason ? `
+      <p style="margin:0 0 8px;font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${BRAND.bad};">Reason for This Decision</p>
+      <div style="background:${BRAND.badBg};border:1px solid ${BRAND.badLine};border-radius:6px;padding:14px 18px;margin:0 0 24px;">
+        <p style="margin:0;font-size:13px;line-height:1.65;color:#7f1d1d;">${reason}</p>
+      </div>` : '';
 
-      <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:16px 20px;margin-bottom:22px;text-align:center;">
-        <p style="margin:0 0 4px;font-size:24px;">❌</p>
-        <p style="margin:0;font-size:15px;font-weight:700;color:#991b1b;">Account Not Approved</p>
-      </div>
-
-      <p style="margin:0 0 14px;font-size:15px;color:#111827;font-weight:600;">Hello, ${name}</p>
-      <p style="margin:0 0 16px;font-size:13px;color:#374151;line-height:1.7;">
-        After reviewing your facility account, we were unable to approve it at this time.
-      </p>
-
-      ${reason ? `
-      <div style="background:#fef2f2;border-left:4px solid #ef4444;border-radius:0 6px 6px 0;padding:12px 16px;margin:0 0 20px;">
-        <p style="margin:0 0 4px;font-size:11px;color:#b91c1c;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;">Reason</p>
-        <p style="margin:0;font-size:13px;color:#7f1d1d;line-height:1.6;">${reason}</p>
-      </div>` : ''}
-
-      <p style="margin:0 0 20px;font-size:13px;color:#374151;line-height:1.7;">
-        If you believe this decision was made in error, you can submit an appeal below. You are allowed one appeal per application.
-      </p>
-
-      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:18px 20px;margin-bottom:22px;">
-        <p style="margin:0 0 12px;font-size:13px;font-weight:700;color:#111827;">Submit an Appeal</p>
+    const appealBlock = `
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:20px 22px;margin:0 0 24px;">
+        <p style="margin:0 0 4px;font-size:13.5px;font-weight:700;color:${BRAND.ink};">Submit an Appeal</p>
+        <p style="margin:0 0 16px;font-size:12.5px;color:${BRAND.body};line-height:1.65;">
+          You may submit one appeal for this application. Choose either option below.
+        </p>
         <table cellpadding="0" cellspacing="0" border="0">
           <tr>
             <td style="padding-right:10px;padding-bottom:8px;">
-              <a href="${appealUrl}"
-                 style="display:inline-block;padding:10px 20px;background:#1d4ed8;color:#ffffff;text-decoration:none;border-radius:6px;font-size:13px;font-weight:600;">
-                Appeal via Form
-              </a>
+              ${buildButton({ href: appealUrl, label: 'Appeal via Form' })}
             </td>
             <td style="padding-bottom:8px;">
-              <a href="${appealWhatsApp}"
-                 style="display:inline-block;padding:10px 20px;background:#16a34a;color:#ffffff;text-decoration:none;border-radius:6px;font-size:13px;font-weight:600;"
-                 target="_blank">
-                Appeal via WhatsApp
-              </a>
+              ${buildOutlineButton({ href: appealWhatsApp, label: 'Appeal via WhatsApp' })}
             </td>
           </tr>
         </table>
-        <p style="margin:10px 0 0;font-size:11.5px;color:#64748b;line-height:1.6;">
-          Our team will review your appeal and respond within 24–48 hours.
+        <p style="margin:12px 0 0;font-size:11.5px;color:${BRAND.muted};line-height:1.6;">
+          Our team will review your appeal and respond within 24&ndash;48 hours.
         </p>
-      </div>
+      </div>`;
 
-    </div>
-    ${buildFooter()}
-  </div>
-</body>
-</html>`;
+    const bodyContent = `
+      ${buildEyebrow('Application Update', BRAND.bad)}
+      ${buildHeading('Your facility account was not approved')}
+
+      <p style="margin:0 0 20px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        Dear ${name},<br>
+        After reviewing your facility account, we are unable to approve it at this time.
+      </p>
+
+      ${reasonBlock}
+
+      <p style="margin:0 0 20px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        If you believe this decision was made in error, you may submit an appeal below.
+      </p>
+
+      ${appealBlock}`;
+
+    return buildShell({ title: 'Account Review Update - Health Jobs Portal', bodyContent });
 }
 
 // ============================================
 // APPEAL SUBMITTED — Admin Notification
 // ============================================
 function buildAppealSubmittedEmail({ facilityName, email, reason }) {
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>New Appeal — Health Jobs Portal</title>
-</head>
-<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;">
-  <div style="max-width:560px;margin:28px auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
-    ${buildHeader()}
-    <div style="padding:28px 32px;">
-      <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:14px 18px;margin-bottom:20px;text-align:center;">
-        <p style="margin:0 0 4px;font-size:24px;">📩</p>
-        <p style="margin:0;font-size:14px;font-weight:700;color:#92400e;">New Account Appeal Received</p>
+    const rows = [
+        { label: 'Facility Name', value: facilityName || 'Not specified' },
+        { label: 'Email Address', value: email || 'Not specified' },
+    ];
+
+    const bodyContent = `
+      ${buildEyebrow('New Appeal Received', BRAND.warn)}
+      ${buildHeading('A facility account has submitted an appeal')}
+
+      <p style="margin:0 0 22px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        A facility account that was previously not approved has submitted an appeal for review.
+      </p>
+
+      <p style="margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${BRAND.muted};">Applicant Details</p>
+      ${buildDetailTable(rows, '22px')}
+
+      <p style="margin:0 0 8px;font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${BRAND.muted};">Appeal Reason</p>
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:14px 18px;margin:0 0 26px;">
+        <p style="margin:0;font-size:13px;color:${BRAND.body};line-height:1.65;">${reason || 'No reason provided.'}</p>
       </div>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:18px;">
-        <tr><td style="padding:7px 0;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6;">
-          <strong>Facility:</strong> ${facilityName}
-        </td></tr>
-        <tr><td style="padding:7px 0;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6;">
-          <strong>Email:</strong> ${email}
-        </td></tr>
-      </table>
-      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px 16px;margin-bottom:20px;">
-        <p style="margin:0 0 6px;font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.4px;">Appeal Reason</p>
-        <p style="margin:0;font-size:13px;color:#374151;line-height:1.6;">${reason || 'No reason provided'}</p>
-      </div>
-      <a href="${ADMIN_PANEL_URL}"
-         style="display:inline-block;padding:10px 24px;background:#1d4ed8;color:#fff;text-decoration:none;border-radius:6px;font-size:13px;font-weight:700;">
-        Review in Admin Panel
-      </a>
-    </div>
-    ${buildFooter()}
-  </div>
-</body>
-</html>`;
+
+      ${buildButton({ href: ADMIN_PANEL_URL, label: 'Review in Admin Panel' })}`;
+
+    return buildShell({ title: 'New Appeal - Health Jobs Portal', bodyContent });
 }
 
 // ============================================
 // APPEAL APPROVED EMAIL TEMPLATE
 // ============================================
 function buildAppealApprovedEmail({ name }) {
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Appeal Approved — Health Jobs Portal</title>
-</head>
-<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;">
-  <div style="max-width:560px;margin:28px auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
-    ${buildHeader()}
-    <div style="padding:28px 32px;">
-      <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:16px 20px;margin-bottom:22px;text-align:center;">
-        <p style="margin:0 0 4px;font-size:28px;">✅</p>
-        <p style="margin:0;font-size:15px;font-weight:700;color:#166534;">Appeal Approved!</p>
-      </div>
-      <p style="margin:0 0 14px;font-size:15px;color:#111827;font-weight:600;">Great news, ${name}!</p>
-      <p style="margin:0 0 18px;font-size:13px;color:#374151;line-height:1.7;">
-        Your appeal has been reviewed and approved by our team. Your facility account is now active and you can post jobs right away.
+    const rows = [
+        { label: 'Post Jobs', value: 'Enabled' },
+        { label: 'Facility Profile Visibility', value: 'Active' },
+        { label: 'Job Alerts to Candidates', value: 'Active' },
+    ];
+
+    const bodyContent = `
+      ${buildEyebrow('Appeal Approved', BRAND.ok)}
+      ${buildHeading('Your appeal has been approved')}
+
+      <p style="margin:0 0 20px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        Dear ${name},<br>
+        Your appeal has been reviewed and approved by our team. Your facility account is now active, and you can post jobs right away.
       </p>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-bottom:22px;">
-        <tr><td style="padding:7px 0;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6;">Post Jobs &nbsp;<span style="color:#16a34a;font-weight:600;">✓ Enabled</span></td></tr>
-        <tr><td style="padding:7px 0;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6;">Facility Profile Visible &nbsp;<span style="color:#16a34a;font-weight:600;">✓ Active</span></td></tr>
-        <tr><td style="padding:7px 0;font-size:13px;color:#374151;">Job Alerts to Candidates &nbsp;<span style="color:#16a34a;font-weight:600;">✓ Active</span></td></tr>
-      </table>
-      <a href="https://healthjobportal.com/index.html"
-         style="display:inline-block;padding:11px 26px;background:#1d4ed8;color:#ffffff;text-decoration:none;border-radius:6px;font-size:13px;font-weight:600;">
-        Go to Dashboard
-      </a>
-    </div>
-    ${buildFooter()}
-  </div>
-</body>
-</html>`;
+
+      ${buildNotice({
+        tone: 'ok',
+        text: `<strong style="color:#14532d;">Your account has been activated.</strong> The features below are now available.`
+      })}
+
+      <p style="margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${BRAND.muted};">Enabled Features</p>
+      ${buildDetailTable(rows, '26px')}
+
+      ${buildButton({ href: 'https://healthjobportal.com/index.html', label: 'Go to Dashboard' })}`;
+
+    return buildShell({ title: 'Appeal Approved - Health Jobs Portal', bodyContent });
 }
 
 // ============================================
 // APPEAL FINAL REJECTED EMAIL TEMPLATE
 // ============================================
 function buildAppealRejectedEmail({ name, reason }) {
-    return `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Appeal Decision — Health Jobs Portal</title>
-</head>
-<body style="margin:0;padding:0;background:#f3f4f6;font-family:Arial,sans-serif;">
-  <div style="max-width:560px;margin:28px auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e5e7eb;">
-    ${buildHeader()}
-    <div style="padding:28px 32px;">
-      <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:16px 20px;margin-bottom:22px;text-align:center;">
-        <p style="margin:0 0 4px;font-size:24px;">❌</p>
-        <p style="margin:0;font-size:15px;font-weight:700;color:#991b1b;">Appeal Not Approved</p>
-      </div>
-      <p style="margin:0 0 14px;font-size:15px;color:#111827;font-weight:600;">Hello, ${name}</p>
-      <p style="margin:0 0 16px;font-size:13px;color:#374151;line-height:1.7;">
-        After carefully reviewing your appeal, we were unable to approve your facility account at this time.
+    const reasonBlock = reason ? `
+      <p style="margin:0 0 8px;font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${BRAND.bad};">Reason for This Decision</p>
+      <div style="background:${BRAND.badBg};border:1px solid ${BRAND.badLine};border-radius:6px;padding:14px 18px;margin:0 0 24px;">
+        <p style="margin:0;font-size:13px;line-height:1.65;color:#7f1d1d;">${reason}</p>
+      </div>` : '';
+
+    const bodyContent = `
+      ${buildEyebrow('Appeal Decision', BRAND.bad)}
+      ${buildHeading('Your appeal was not approved')}
+
+      <p style="margin:0 0 20px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        Dear ${name},<br>
+        After carefully reviewing your appeal, we are unable to approve your facility account at this time.
       </p>
-      ${reason ? `
-      <div style="background:#fef2f2;border-left:4px solid #ef4444;border-radius:0 6px 6px 0;padding:12px 16px;margin:0 0 20px;">
-        <p style="margin:0 0 4px;font-size:11px;color:#b91c1c;font-weight:700;text-transform:uppercase;letter-spacing:0.4px;">Reason</p>
-        <p style="margin:0;font-size:13px;color:#7f1d1d;line-height:1.6;">${reason}</p>
-      </div>` : ''}
-      <p style="margin:0 0 20px;font-size:13px;color:#374151;line-height:1.7;">
-        This decision is final. If you would like to try again, please create a new account with updated and complete information. For further queries, contact us on WhatsApp.
+
+      ${reasonBlock}
+
+      <p style="margin:0 0 24px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        This decision is final. If you would like to try again, please create a new account with updated and complete information. For any further queries, you may contact our support team.
       </p>
-      <a href="https://wa.me/923141303160"
-         style="display:inline-block;padding:11px 26px;background:#16a34a;color:#ffffff;text-decoration:none;border-radius:6px;font-size:13px;font-weight:600;"
-         target="_blank">
-        Contact via WhatsApp
-      </a>
-    </div>
-    ${buildFooter()}
-  </div>
-</body>
-</html>`;
+
+      ${buildOutlineButton({ href: 'https://wa.me/923141303160', label: 'Contact Support' })}`;
+
+    return buildShell({ title: 'Appeal Decision - Health Jobs Portal', bodyContent });
 }
 
 
@@ -794,22 +834,26 @@ app.post('/api/send-notification', async (req, res) => {
                 html
             });
 
-            // New employer accounts need admin approval — notify the admin.
+            // New employer accounts need admin approval — notify every admin.
+            // Awaited (not fire-and-forget) so a serverless freeze cannot kill
+            // the request before it leaves. sendAdminEmail never throws.
+            let adminNotify = null;
             if (role === 'employer') {
                 const adminHtml = buildAdminNotifyEmail({
                     facilityName: name, email, facilityType, ownershipType,
                     city, country, contactPerson, contactPhone
                 });
-                sendEmail({
-                    to: ADMIN_EMAIL, toName: 'Admin',
+                adminNotify = await sendAdminEmail({
                     subject: `New Employer Awaiting Approval: ${name}`,
                     html: adminHtml
-                }).catch(e => console.error('Admin notify email failed:', e.message));
+                });
+                console.log('[welcome] employer signup — admin notified:', adminNotify.recipients.join(', '),
+                    adminNotify.failed.length ? ('failed: ' + adminNotify.failed.join(', ')) : '(all delivered)');
             }
 
             return result.success
-                ? res.status(200).json({ success: true, message: 'Welcome email sent' })
-                : res.status(500).json({ success: false, error: result.error });
+                ? res.status(200).json({ success: true, message: 'Welcome email sent', adminNotify })
+                : res.status(500).json({ success: false, error: result.error, adminNotify });
         }
 
         // TYPE 1B: EMPLOYER APPROVED
@@ -852,14 +896,15 @@ app.post('/api/send-notification', async (req, res) => {
                 return res.status(400).json({ success: false, error: 'email and facilityName required' });
             }
             const html = buildAppealSubmittedEmail({ facilityName, email, reason });
-            const result = await sendEmail({
-                to: ADMIN_EMAIL, toName: 'Admin',
-                subject: `New Appeal: ${facilityName} — Health Jobs Portal`,
+            const adminNotify = await sendAdminEmail({
+                subject: `New Appeal: ${facilityName} - Health Jobs Portal`,
                 html
             });
-            return result.success
-                ? res.status(200).json({ success: true, message: 'Appeal notification sent to admin' })
-                : res.status(500).json({ success: false, error: result.error });
+            return res.status(200).json({
+                success: true,
+                message: 'Appeal notification sent to admin',
+                adminNotify
+            });
         }
 
         // TYPE 1E: APPEAL APPROVED
@@ -930,6 +975,12 @@ app.post('/api/send-notification', async (req, res) => {
             if (!postId || !category) {
                 return res.status(400).json({ success: false, message: 'postId and category required.' });
             }
+            // This branch reads Firestore — fail loudly and clearly if the
+            // database is not configured, instead of a cryptic TypeError.
+            if (!db) {
+                console.error('[new-post] Firestore not initialized — check FIREBASE_SERVICE_ACCOUNT');
+                return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
+            }
 
             const postUrl = link || `https://healthjobportal.com/post-detail.html?id=${postId}`;
             const isEmployerPost = postType === 'employer_post';
@@ -978,15 +1029,32 @@ app.post('/api/send-notification', async (req, res) => {
             const postLocAll = postLocLowers.length === 0; // no location = send to all
 
             // ── Firestore: fetch only the right role ──────────
-            // One targeted query instead of fetching all users
+            // IMPORTANT: we query by role ONLY. Filtering on
+            // `accountStatus == 'approved'` in the query silently excluded every
+            // user that has no accountStatus field at all (candidates are stored
+            // without it) or that is still 'pending' — which is why related
+            // accounts never received alerts. Approval is now decided in code
+            // below, where a missing status is treated as approved.
             const targetRole = isEmployerPost ? 'candidate' : 'employer';
             const usersSnap = await db.collection('users')
                 .where('role', '==', targetRole)
-                .where('accountStatus', '==', 'approved')
                 .get();
 
             if (usersSnap.empty) {
+                console.log(`[new-post] no users with role=${targetRole}; nothing to notify`);
                 return res.json({ success: true, message: 'No matching users found.', sent: 0 });
+            }
+
+            // A user is eligible unless explicitly blocked. Only an explicit
+            // non-approved, non-empty status (pending/rejected/deactivated)
+            // excludes them; missing/undefined means "fine to email".
+            const BLOCKED_STATUSES = new Set(['pending', 'rejected', 'deactivated', 'deactive', 'banned', 'suspended']);
+            function isEligible(user) {
+                if (user.isDeactivated === true) return false;
+                const st = String(user.accountStatus || '').toLowerCase().trim();
+                if (!st) return true;              // no status field → eligible
+                if (st === 'approved' || st === 'active') return true;
+                return !BLOCKED_STATUSES.has(st);  // unknown value → eligible
             }
 
             // ── Helper: does user location match any post location ──
@@ -1019,24 +1087,30 @@ app.post('/api/send-notification', async (req, res) => {
             let sent = 0;
             const logBatch = db.batch();
             let batchCount = 0;
+            // Counters so a "0 sent" response is explainable from the logs alone.
+            const skipped = { noEmail: 0, isPoster: 0, alreadySent: 0, notEligible: 0, category: 0, location: 0, sendFailed: 0 };
+            let flushErrorCount = 0;
+
+            console.log(`[new-post] candidates: role=${targetRole}, fetched=${usersSnap.size}, alreadySent=${alreadySentUsers.size}`);
 
             for (const userDoc of usersSnap.docs) {
                 const user = userDoc.data();
                 const userId = userDoc.id;
 
-                if (!user.email) continue;
-                if (userId === posterId) continue;
-                if (alreadySentUsers.has(userId)) continue;
+                if (!user.email) { skipped.noEmail++; continue; }
+                if (userId === posterId) { skipped.isPoster++; continue; }
+                if (alreadySentUsers.has(userId)) { skipped.alreadySent++; continue; }
+                if (!isEligible(user)) { skipped.notEligible++; continue; }
 
                 // Category match
                 const userCatStr = user.category || user.profession || user.qualification || '';
-                if (!userCatMatches(userCatStr)) continue;
+                if (!userCatMatches(userCatStr)) { skipped.category++; continue; }
 
                 // Location match
                 const userLocStr = user.city || user.location || '';
-                if (!userLocMatches(userLocStr)) continue;
+                if (!userLocMatches(userLocStr)) { skipped.location++; continue; }
 
-                const userName = user.name || user.displayName || 'User';
+                const userName = user.facilityName || user.fullName || user.name || user.displayName || 'Health Jobs User';
                 const rows = [
                     { label: 'Category', value: rawCats.join(', ') || category },
                     { label: 'Location', value: rawLocs.join(', ') || 'Pakistan' },
@@ -1066,19 +1140,36 @@ app.post('/api/send-notification', async (req, res) => {
                     logBatch.set(logRef, { postId, userId, sentAt: new Date().toISOString() });
                     batchCount++;
                     if (batchCount >= 400) {
-                        await logBatch.commit();
+                        // A failed log flush must not abort the whole run — the
+                        // emails already went out; worst case a few users get a
+                        // duplicate on the next post.
+                        try { await logBatch.commit(); } catch (e) {
+                            flushErrorCount++;
+                            console.error('Log batch flush error:', e.message);
+                        }
                         batchCount = 0;
                     }
+                } else {
+                    skipped.sendFailed++;
                 }
             }
 
             // Flush remaining logs
             if (batchCount > 0) {
-                try { await logBatch.commit(); } catch(e) { console.error('Log batch error:', e.message); }
+                try { await logBatch.commit(); } catch(e) {
+                    flushErrorCount++;
+                    console.error('Log batch flush error:', e.message);
+                }
             }
 
-            console.log(`Sent: ${sent}`);
-            return res.json({ success: true, sent, message: `${sent} users notified.` });
+            console.log(`[new-post] sent=${sent} skipped=${JSON.stringify(skipped)} logFlushErrors=${flushErrorCount}`);
+            return res.json({
+                success: true,
+                sent,
+                skipped,
+                fetched: usersSnap.size,
+                message: `${sent} users notified.`
+            });
         }
 
         return res.status(400).json({
@@ -1093,9 +1184,55 @@ app.post('/api/send-notification', async (req, res) => {
 });
 
 // ============================================
+// DIAGNOSTIC: GET /api/email-health
+// Reports whether Brevo is configured and how far the request chain gets.
+// Does not print secrets — only whether each env var is present.
+// ============================================
+app.get('/api/email-health', async (req, res) => {
+    const info = {
+        brevoApiKey: !!process.env.BREVO_API_KEY,
+        fromEmail: process.env.FROM_EMAIL || process.env.SENDER_EMAIL || null,
+        fromName: process.env.FROM_NAME || 'Health Jobs Portal',
+        adminEmail: ADMIN_EMAIL,
+        adminEmailExtra: ADMIN_EMAILS_EXTRA,
+        firebase: {
+            initialized: !!db,
+            databaseURL: admin.apps.length ? (admin.apps[0].options.databaseURL || null) : null,
+        },
+    };
+
+    // If Firebase is up, count eligible users per role so a "0 recipients"
+    // result can be traced to the data, not guessed at.
+    if (db) {
+        try {
+            const usersSnap = await db.collection('users').limit(500).get();
+            const byRole = {};
+            let noEmail = 0;
+            usersSnap.forEach(d => {
+                const u = d.data();
+                const r = u.role || '(none)';
+                byRole[r] = (byRole[r] || 0) + 1;
+                if (!u.email) noEmail++;
+            });
+            info.sampledUsers = usersSnap.size;
+            info.usersByRole = byRole;
+            info.usersWithoutEmail = noEmail;
+        } catch (e) {
+            info.userScanError = e.message;
+        }
+    }
+
+    return res.json({ success: true, ...info });
+});
+
+// ============================================
 // EXPIRY WARNING (Auto Cron)
 // ============================================
 app.get('/api/expiry-warning', async (req, res) => {
+    if (!db) {
+        console.error('[expiry] Firestore not initialized — check FIREBASE_SERVICE_ACCOUNT');
+        return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
+    }
     try {
         const now = new Date();
         const in24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
@@ -1193,10 +1330,17 @@ app.get('/', (req, res) => {
     res.json({
         status: 'ok',
         service: 'Health Jobs Mail Server',
-        version: '11.0.0',
+        version: '12.0.0',
         endpoint: 'POST /api/send-notification',
-        types: ['welcome', 'employer-approved', 'employer-rejected', 'job-alert', 'new-post'],
-        cron: 'GET /api/expiry-warning'
+        types: [
+            'welcome', 'employer-approved', 'employer-rejected',
+            'appeal-submitted', 'appeal-approved', 'appeal-rejected',
+            'job-alert', 'new-post'
+        ],
+        emailConfigured: isEmailConfigured(),
+        adminEmail: ADMIN_EMAIL,
+        cron: 'GET /api/expiry-warning',
+        health: 'GET /api/email-health'
     });
 });
 
@@ -1204,6 +1348,16 @@ app.get('/', (req, res) => {
 // EXPORTS
 // ============================================
 module.exports = app;
+
+// Startup self-check — logs exactly what is missing, so a silent "no emails"
+// problem is visible in the deploy logs immediately.
+if (!isEmailConfigured()) {
+    console.error('[startup] WARNING: email is NOT configured. Set BREVO_API_KEY and FROM_EMAIL.');
+}
+if (!db) {
+    console.error('[startup] WARNING: Firestore is NOT initialized. Check FIREBASE_SERVICE_ACCOUNT.');
+}
+console.log('[startup] admin alerts go to:', [ADMIN_EMAIL, ...ADMIN_EMAILS_EXTRA].join(', '));
 
 if (process.env.NODE_ENV !== 'production') {
     const PORT = process.env.PORT || 3000;
