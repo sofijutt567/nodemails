@@ -4,8 +4,77 @@ const admin = require('firebase-admin');
 require('dotenv').config();
 
 const app = express();
-app.use(cors({ origin: true }));
+
+// ============================================
+// CORS — sirf apni website se requests allow
+// ============================================
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://healthjobportal.com,https://www.healthjobportal.com')
+    .split(',').map(s => s.trim()).filter(Boolean);
+
+app.use(cors({
+    origin: function (origin, callback) {
+        // Allow requests with no origin (server-to-server calls, Postman, cron)
+        if (!origin) return callback(null, true);
+        if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+        return callback(new Error('Not allowed by CORS'));
+    }
+}));
+
 app.use(express.json());
+
+// ============================================
+// RATE LIMITING — abuse se bachao
+// ============================================
+const rateLimitMap = new Map();
+const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
+const RATE_LIMIT_MAX = 20; // max 20 requests per IP per window
+
+function rateLimit(req, res, next) {
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    const entry = rateLimitMap.get(ip) || { count: 0, start: now };
+
+    if (now - entry.start > RATE_LIMIT_WINDOW_MS) {
+        entry.count = 1;
+        entry.start = now;
+    } else {
+        entry.count++;
+    }
+    rateLimitMap.set(ip, entry);
+
+    if (entry.count > RATE_LIMIT_MAX) {
+        console.warn(`[rate-limit] blocked IP: ${ip} (${entry.count} requests)`);
+        return res.status(429).json({ success: false, error: 'Too many requests. Please try again later.' });
+    }
+    next();
+}
+
+// ============================================
+// FIREBASE AUTH — sirf logged-in users
+// ============================================
+async function requireAuth(req, res, next) {
+    // Allow internal server-to-server calls via secret key
+    const internalSecret = req.headers['x-internal-secret'];
+    if (internalSecret && internalSecret === process.env.INTERNAL_SECRET) {
+        return next();
+    }
+
+    const authHeader = req.headers['authorization'] || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+
+    if (!token) {
+        return res.status(401).json({ success: false, error: 'Unauthorized: no token provided' });
+    }
+
+    try {
+        const decoded = await admin.auth().verifyIdToken(token);
+        req.user = decoded;
+        next();
+    } catch (err) {
+        console.warn('[auth] invalid token:', err.message);
+        return res.status(401).json({ success: false, error: 'Unauthorized: invalid or expired token' });
+    }
+}
 
 // ============================================
 // ADMIN NOTIFICATION SETTINGS
@@ -806,7 +875,7 @@ function buildExpiryEmail({ posterName, postTitle, expiryDate }) {
 // ============================================
 // POST /api/send-notification
 // ============================================
-app.post('/api/send-notification', async (req, res) => {
+app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
     try {
         const {
             type, email, name, postId, title, category, location, salary,
@@ -1236,14 +1305,44 @@ app.get('/api/expiry-warning', async (req, res) => {
     try {
         const now = new Date();
         const in24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-        const allPosts = await db.collection('posts').get();
+        const nowIso = now.toISOString();
+        const in24hIso = in24h.toISOString();
 
-        if (allPosts.empty) {
-            return res.json({ success: true, message: 'No posts found.', warned: 0 });
+        // QUOTA FIX: only fetch posts that can actually expire in the next 24h.
+        // The old `collection('posts').get()` read EVERY post on EVERY run,
+        // which blew through the daily Firestore read quota (RESOURCE_EXHAUSTED).
+        // Two server-side filters (expiresAt window + not-yet-warned) plus a hard
+        // limit keep this at a handful of reads per run instead of thousands.
+        // NOTE: posts.expiresAt must be stored as an ISO-8601 string for this range
+        // query to work (which is what the write path already does).
+        let duePosts;
+        try {
+            duePosts = await db.collection('posts')
+                .where('expiresAt', '>', nowIso)
+                .where('expiresAt', '<=', in24hIso)
+                .where('expiryEmailSent', '==', false)
+                .limit(200)
+                .get();
+        } catch (queryErr) {
+            // If the composite index is missing Firestore throws FAILED_PRECONDITION
+            // and prints the exact index-creation URL. Fall back to the cheap
+            // expiresAt-only query so the cron still runs until the index is built.
+            console.error('[expiry] filtered query failed (' + queryErr.code + '):', queryErr.message);
+            console.error('[expiry] falling back to expiresAt-only query — create the suggested index to fix this.');
+            duePosts = await db.collection('posts')
+                .where('expiresAt', '>', nowIso)
+                .where('expiresAt', '<=', in24hIso)
+                .limit(200)
+                .get();
+        }
+
+        if (duePosts.empty) {
+            console.log('[expiry] no posts expiring in the next 24h');
+            return res.json({ success: true, message: 'No posts expiring soon.', warned: 0 });
         }
 
         let warned = 0;
-        for (const doc of allPosts.docs) {
+        for (const doc of duePosts.docs) {
             const post = doc.data();
             const postId = doc.id;
 
