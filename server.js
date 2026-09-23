@@ -68,6 +68,22 @@ async function requireAuth(req, res, next) {
 
     try {
         const decoded = await admin.auth().verifyIdToken(token);
+
+        // ── Admin-only gate ──────────────────────────────────────────
+        // Only the admin email(s) are allowed to call this API via token.
+        // Server-to-server calls (x-internal-secret) bypass this check above.
+        const allowedAdmins = [
+            'sufiangsufiang50@gmail.com',
+            ...(process.env.ADMIN_EMAIL ? [process.env.ADMIN_EMAIL] : []),
+            ...(process.env.ADMIN_EMAILS_EXTRA ? process.env.ADMIN_EMAILS_EXTRA.split(',').map(s => s.trim()) : []),
+        ].filter(Boolean);
+
+        if (!allowedAdmins.includes(decoded.email)) {
+            console.warn('[auth] blocked non-admin attempt from:', decoded.email);
+            return res.status(403).json({ success: false, error: 'Forbidden: admin access only' });
+        }
+        // ────────────────────────────────────────────────────────────
+
         req.user = decoded;
         next();
     } catch (err) {
@@ -994,7 +1010,7 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
         }
 
         // TYPE 1F: APPEAL FINAL REJECTED
-        if (type === 'appeal-rejected') {
+        if (type === 'appeal-rejected' || type === 'employer-rejected-final') {
             if (!email || !name) {
                 return res.status(400).json({ success: false, error: 'email and name required' });
             }
