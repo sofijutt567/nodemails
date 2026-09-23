@@ -6,9 +6,9 @@ require('dotenv').config();
 const app = express();
 
 // ============================================
-// CORS ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â sirf apni website se requests allow
+// CORS — sirf apni website se requests allow
 // ============================================
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://healthjobportal.com,https://www.healthjobportal.com')
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://healthjobportal.com,https://www.healthjobportal.com,https://adminhealthjobs.pages.dev')
     .split(',').map(s => s.trim()).filter(Boolean);
 
 app.use(cors({
@@ -23,7 +23,7 @@ app.use(cors({
 app.use(express.json());
 
 // ============================================
-// RATE LIMITING ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â abuse se bachao
+// RATE LIMITING — abuse se bachao
 // ============================================
 const rateLimitMap = new Map();
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
@@ -50,7 +50,7 @@ function rateLimit(req, res, next) {
 }
 
 // ============================================
-// FIREBASE AUTH ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â sirf logged-in users
+// FIREBASE AUTH — sirf logged-in users
 // ============================================
 async function requireAuth(req, res, next) {
     // Allow internal server-to-server calls via secret key
@@ -82,12 +82,13 @@ async function requireAuth(req, res, next) {
 // Admin alerts (new employer signups, appeals) go here.
 // Set ADMIN_EMAIL in Vercel env vars to change it without a redeploy.
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "supporthealthjobs@gmail.com";
-// Extra recipients (comma-separated) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â every admin alert is also copied here.
+// Extra recipients (comma-separated) — every admin alert is also copied here.
 // sufiangsufiang50@gmail.com is included so the owner gets every signup too.
 const ADMIN_EMAILS_EXTRA = (process.env.ADMIN_EMAILS_EXTRA || "sufiangsufiang50@gmail.com")
     .split(',').map(s => s.trim()).filter(Boolean);
-// Update this once the admin panel is deployed (e.g. https://healthjobportal.com/admin.html)
-const ADMIN_PANEL_URL = process.env.ADMIN_PANEL_URL || "https://adminhealthjobs.pages.dev/";
+// Admin panel is hosted on Cloudflare Pages at this URL.
+// Override via ADMIN_PANEL_URL env var if it ever moves.
+const ADMIN_PANEL_URL = process.env.ADMIN_PANEL_URL || "https://adminhealthjobs.pages.dev";
 
 // ============================================
 // FIREBASE ADMIN INIT
@@ -177,7 +178,7 @@ async function sendEmail({ to, toName, subject, html }) {
             lastError = result.message || result.error || `HTTP ${response.status}`;
             console.error(`[email] Brevo rejected ${to} (attempt ${attempt}): ${lastError}`);
 
-            // 4xx (except 429) means the request itself is wrong ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â retrying won't help.
+            // 4xx (except 429) means the request itself is wrong — retrying won't help.
             if (response.status >= 400 && response.status < 500 && response.status !== 429) {
                 return { success: false, error: lastError, status: response.status };
             }
@@ -399,7 +400,7 @@ function buildHeader() {
     </div>`;
 }
 
-// Page shell ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â every email shares this so spacing/width/font stay identical.
+// Page shell — every email shares this so spacing/width/font stay identical.
 // bodyContent is the inner HTML of the content block.
 function buildShell({ title, bodyContent }) {
     return `<!DOCTYPE html>
@@ -439,7 +440,7 @@ function buildHeading(text) {
     return `<h1 class="hjp-h1" style="margin:0 0 18px;font-size:19px;line-height:1.35;font-weight:700;color:${BRAND.ink};">${text}</h1>`;
 }
 
-// Left-accent notice bar ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â replaces the old centered emoji boxes.
+// Left-accent notice bar — replaces the old centered emoji boxes.
 function buildNotice({ text, tone }) {
     const tones = {
         ok:   { bg: BRAND.okBg,   line: BRAND.okLine,   accent: BRAND.ok,   color: '#14532d' },
@@ -482,14 +483,14 @@ function buildFooter() {
       <div style="border-top:1px solid #e8ecf1;padding-top:14px;margin-top:4px;">
         <p style="font-size:12px;color:#64748b;margin:0 0 10px;line-height:1.8;">
           <a href="https://wa.me/923141303160" style="color:#16a34a;text-decoration:none;font-weight:600;" target="_blank">WhatsApp: +92 314 130 3160</a>
-          &nbsp;Ãƒâ€šÃ‚Â·&nbsp;
+          &nbsp;·&nbsp;
           <a href="mailto:supporthealthjobs@gmail.com" style="color:#1d4ed8;text-decoration:none;font-weight:600;">supporthealthjobs@gmail.com</a>
         </p>
         <p style="font-size:11px;color:#94a3b8;margin:0 0 8px;">
           <a href="https://healthjobportal.com/terms.html" style="color:#64748b;text-decoration:none;">Terms of Service</a>
-          &nbsp;Ãƒâ€šÃ‚Â·&nbsp;
+          &nbsp;·&nbsp;
           <a href="https://healthjobportal.com/privcy.html" style="color:#64748b;text-decoration:none;">Privacy Policy</a>
-          &nbsp;Ãƒâ€šÃ‚Â·&nbsp;
+          &nbsp;·&nbsp;
           <a href="https://healthjobportal.com/about.html" style="color:#64748b;text-decoration:none;">About Us</a>
         </p>
         <p style="font-size:11px;color:#b0b8c1;margin:0 0 4px;">&copy; 2026 Health Jobs Portal &middot; Pakistan's #1 Digital Healthcare Network</p>
@@ -578,7 +579,7 @@ function buildWelcomeEmail({
     }
 
 // ============================================
-// ADMIN NOTIFICATION EMAIL ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â new employer signup
+// ADMIN NOTIFICATION EMAIL — new employer signup
 // ============================================
 function buildAdminNotifyEmail({ facilityName, email, facilityType, ownershipType, city, country, contactPerson, contactPhone }) {
     const location = [city, country].filter(Boolean).join(', ') || 'Not specified';
@@ -692,7 +693,7 @@ function buildEmployerRejectedEmail({ name, reason, uid }) {
 }
 
 // ============================================
-// APPEAL SUBMITTED ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Admin Notification
+// APPEAL SUBMITTED — Admin Notification
 // ============================================
 function buildAppealSubmittedEmail({ facilityName, email, reason }) {
     const rows = [
@@ -903,7 +904,7 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
                 html
             });
 
-            // New employer accounts need admin approval ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â notify every admin.
+            // New employer accounts need admin approval — notify every admin.
             // Awaited (not fire-and-forget) so a serverless freeze cannot kill
             // the request before it leaves. sendAdminEmail never throws.
             let adminNotify = null;
@@ -916,7 +917,7 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
                     subject: `New Employer Awaiting Approval: ${name}`,
                     html: adminHtml
                 });
-                console.log('[welcome] employer signup ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â admin notified:', adminNotify.recipients.join(', '),
+                console.log('[welcome] employer signup — admin notified:', adminNotify.recipients.join(', '),
                     adminNotify.failed.length ? ('failed: ' + adminNotify.failed.join(', ')) : '(all delivered)');
             }
 
@@ -958,7 +959,7 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
                 : res.status(500).json({ success: false, error: result.error });
         }
 
-        // TYPE 1D: APPEAL SUBMITTED ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â admin notify
+        // TYPE 1D: APPEAL SUBMITTED — admin notify
         if (type === 'appeal-submitted') {
             const { facilityName, reason } = req.body;
             if (!email || !facilityName) {
@@ -984,7 +985,7 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
             const html = buildAppealApprovedEmail({ name });
             const result = await sendEmail({
                 to: email, toName: name,
-                subject: `Your Appeal Has Been Approved ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Health Jobs Portal`,
+                subject: `Your Appeal Has Been Approved — Health Jobs Portal`,
                 html
             });
             return result.success
@@ -1001,7 +1002,7 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
             const html = buildAppealRejectedEmail({ name, reason });
             const result = await sendEmail({
                 to: email, toName: name,
-                subject: `Update on Your Appeal ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Health Jobs Portal`,
+                subject: `Update on Your Appeal — Health Jobs Portal`,
                 html
             });
             return result.success
@@ -1031,7 +1032,7 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
             });
             const result = await sendEmail({
                 to: email, toName: name,
-                subject: `New Job: ${jobTitle} ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â ${jobLocation || 'Pakistan'}`,
+                subject: `New Job: ${jobTitle} — ${jobLocation || 'Pakistan'}`,
                 html
             });
             return result.success
@@ -1044,10 +1045,10 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
             if (!postId || !category) {
                 return res.status(400).json({ success: false, message: 'postId and category required.' });
             }
-            // This branch reads Firestore ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â fail loudly and clearly if the
+            // This branch reads Firestore — fail loudly and clearly if the
             // database is not configured, instead of a cryptic TypeError.
             if (!db) {
-                console.error('[new-post] Firestore not initialized ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â check FIREBASE_SERVICE_ACCOUNT');
+                console.error('[new-post] Firestore not initialized — check FIREBASE_SERVICE_ACCOUNT');
                 return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
             }
 
@@ -1056,7 +1057,7 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
 
             console.log('Processing:', { postId, title, category, location, postType });
 
-            // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Poster info ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
+            // ── Poster info ──────────────────────────────────
             let realPosterName = posterName || 'Health Jobs User';
             if (posterId) {
                 try {
@@ -1068,16 +1069,16 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
                 } catch (e) { console.error('Poster fetch error:', e.message); }
             }
 
-            // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Already-sent log (single read) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
+            // ── Already-sent log (single read) ───────────────
             const logsSnap = await db.collection('email_logs')
                 .where('postId', '==', postId).get();
             const alreadySentUsers = new Set(logsSnap.docs.map(d => d.data().userId));
 
-            // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Parse post categories (array or comma-string) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
+            // ── Parse post categories (array or comma-string) ─
             // Supports: "nurse", ["nurse","doctor"], "nurse,doctor"
             const rawCats = Array.isArray(category)
                 ? category
-                : String(category).split(/[,ÃƒËœÃ…â€™|\/]+/).map(s => s.trim()).filter(Boolean);
+                : String(category).split(/[,،|\/]+/).map(s => s.trim()).filter(Boolean);
 
             // Normalise & get group for each post category
             const postCatData = rawCats.map(c => {
@@ -1089,19 +1090,19 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
             const postTitleLower = (title || '').toLowerCase().trim();
             const postTitleGroup = getCategoryGroup(postTitleLower);
 
-            // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Parse post locations (array or comma-string) ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
+            // ── Parse post locations (array or comma-string) ──
             // Supports: "Lahore", ["Lahore","Rawalpindi"], "Lahore,Rawalpindi"
             const rawLocs = Array.isArray(location)
                 ? location
-                : String(location || '').split(/[,ÃƒËœÃ…â€™|\/]+/).map(s => s.trim()).filter(Boolean);
+                : String(location || '').split(/[,،|\/]+/).map(s => s.trim()).filter(Boolean);
             const postLocLowers = rawLocs.map(l => l.toLowerCase().trim()).filter(Boolean);
             const postLocAll = postLocLowers.length === 0; // no location = send to all
 
-            // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Firestore: fetch only the right role ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
+            // ── Firestore: fetch only the right role ──────────
             // IMPORTANT: we query by role ONLY. Filtering on
             // `accountStatus == 'approved'` in the query silently excluded every
             // user that has no accountStatus field at all (candidates are stored
-            // without it) or that is still 'pending' ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â which is why related
+            // without it) or that is still 'pending' — which is why related
             // accounts never received alerts. Approval is now decided in code
             // below, where a missing status is treated as approved.
             const targetRole = isEmployerPost ? 'candidate' : 'employer';
@@ -1121,24 +1122,24 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
             function isEligible(user) {
                 if (user.isDeactivated === true) return false;
                 const st = String(user.accountStatus || '').toLowerCase().trim();
-                if (!st) return true;              // no status field ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ eligible
+                if (!st) return true;              // no status field → eligible
                 if (st === 'approved' || st === 'active') return true;
-                return !BLOCKED_STATUSES.has(st);  // unknown value ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ eligible
+                return !BLOCKED_STATUSES.has(st);  // unknown value → eligible
             }
 
-            // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Helper: does user location match any post location ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
+            // ── Helper: does user location match any post location ──
             function userLocMatches(userLocStr) {
                 if (postLocAll) return true; // post has no location filter
                 const userLocs = String(userLocStr || '')
-                    .split(/[,ÃƒËœÃ…â€™|\/]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
-                if (userLocs.length === 0) return true; // user has no location set ÃƒÂ¢Ã¢â‚¬Â Ã¢â‚¬â„¢ include
+                    .split(/[,،|\/]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
+                if (userLocs.length === 0) return true; // user has no location set → include
                 return userLocs.some(ul => postLocLowers.some(pl => locationsMatch(pl, ul)));
             }
 
-            // ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ Helper: does user category match any post category ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬ÃƒÂ¢Ã¢â‚¬ÂÃ¢â€šÂ¬
+            // ── Helper: does user category match any post category ──
             function userCatMatches(userCatStr) {
                 const userCats = String(userCatStr || '')
-                    .split(/[,ÃƒËœÃ…â€™|\/]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
+                    .split(/[,،|\/]+/).map(s => s.trim().toLowerCase()).filter(Boolean);
                 if (userCats.length === 0) return false;
 
                 return userCats.some(uc => {
@@ -1204,12 +1205,12 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
 
                 if (result.success) {
                     sent++;
-                    // Batch log writes ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â flush every 400 to stay under Firestore limits
+                    // Batch log writes — flush every 400 to stay under Firestore limits
                     const logRef = db.collection('email_logs').doc(`${postId}_${userId}`);
                     logBatch.set(logRef, { postId, userId, sentAt: new Date().toISOString() });
                     batchCount++;
                     if (batchCount >= 400) {
-                        // A failed log flush must not abort the whole run ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the
+                        // A failed log flush must not abort the whole run — the
                         // emails already went out; worst case a few users get a
                         // duplicate on the next post.
                         try { await logBatch.commit(); } catch (e) {
@@ -1255,7 +1256,7 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
 // ============================================
 // DIAGNOSTIC: GET /api/email-health
 // Reports whether Brevo is configured and how far the request chain gets.
-// Does not print secrets ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â only whether each env var is present.
+// Does not print secrets — only whether each env var is present.
 // ============================================
 app.get('/api/email-health', async (req, res) => {
     const info = {
@@ -1299,7 +1300,7 @@ app.get('/api/email-health', async (req, res) => {
 // ============================================
 app.get('/api/expiry-warning', async (req, res) => {
     if (!db) {
-        console.error('[expiry] Firestore not initialized ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â check FIREBASE_SERVICE_ACCOUNT');
+        console.error('[expiry] Firestore not initialized — check FIREBASE_SERVICE_ACCOUNT');
         return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
     }
     try {
@@ -1328,7 +1329,7 @@ app.get('/api/expiry-warning', async (req, res) => {
             // and prints the exact index-creation URL. Fall back to the cheap
             // expiresAt-only query so the cron still runs until the index is built.
             console.error('[expiry] filtered query failed (' + queryErr.code + '):', queryErr.message);
-            console.error('[expiry] falling back to expiresAt-only query ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â create the suggested index to fix this.');
+            console.error('[expiry] falling back to expiresAt-only query — create the suggested index to fix this.');
             duePosts = await db.collection('posts')
                 .where('expiresAt', '>', nowIso)
                 .where('expiresAt', '<=', in24hIso)
@@ -1355,7 +1356,7 @@ app.get('/api/expiry-warning', async (req, res) => {
             }
             if (expiryTime <= now.getTime() || expiryTime > in24h.getTime()) continue;
 
-            // Fetch poster info ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â check all possible name fields
+            // Fetch poster info — check all possible name fields
             let posterEmail = null;
             let posterName = 'User';
 
@@ -1377,14 +1378,14 @@ app.get('/api/expiry-warning', async (req, res) => {
                     console.error(`Post ${postId}: user fetch error:`, e.message);
                 }
             } else {
-                // posterId missing ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â try using email directly on the post doc
+                // posterId missing — try using email directly on the post doc
                 posterEmail = post.email || post.posterEmail || null;
                 posterName = post.posterName || post.name || 'User';
                 console.log(`Post ${postId}: no posterId, using post-level email:`, posterEmail);
             }
 
             if (!posterEmail) {
-                console.log(`Post ${postId}: skipped ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â no email found`);
+                console.log(`Post ${postId}: skipped — no email found`);
                 continue;
             }
 
@@ -1448,7 +1449,7 @@ app.get('/', (req, res) => {
 // ============================================
 module.exports = app;
 
-// Startup self-check ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â logs exactly what is missing, so a silent "no emails"
+// Startup self-check — logs exactly what is missing, so a silent "no emails"
 // problem is visible in the deploy logs immediately.
 if (!isEmailConfigured()) {
     console.error('[startup] WARNING: email is NOT configured. Set BREVO_API_KEY and FROM_EMAIL.');
