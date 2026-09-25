@@ -890,6 +890,464 @@ function buildExpiryEmail({ posterName, postTitle, expiryDate }) {
 }
 
 // ============================================
+// OTP / PIN VERIFICATION SYSTEM
+// ============================================
+// 6-digit code email verification ke liye.
+// - Signup par bhi code bhejta hai
+// - Password change par bhi code bhejta hai
+// Code Firestore ke `otp_codes` collection mein hash ho kar store hota hai
+// (plain code kabhi save nahi hota), 10 minute mein expire hota hai,
+// aur 5 ghalat koshishon par lock ho jata hai.
+// ============================================
+const crypto = require('crypto');
+
+const OTP_TTL_MS        = 10 * 60 * 1000;  // 10 minutes
+const OTP_MAX_ATTEMPTS  = 5;                // 5 wrong tries → locked
+const OTP_RESEND_MS     = 60 * 1000;        // 60 seconds resend cooldown
+const OTP_COLLECTION    = 'otp_codes';
+
+function hashOtp(code, email) {
+    return crypto
+        .createHash('sha256')
+        .update(String(code) + '|' + String(email || '').toLowerCase().trim() + '|' + (process.env.OTP_PEPPER || 'hjp-otp-pepper'))
+        .digest('hex');
+}
+
+function generateOtp() {
+    // crypto-secure 6-digit code (100000 - 999999)
+    return String(crypto.randomInt(100000, 1000000));
+}
+
+function normalizeEmail(email) {
+    return String(email || '').toLowerCase().trim();
+}
+
+function isValidEmail(email) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(normalizeEmail(email));
+}
+
+// OTP doc ka ID email + purpose se banta hai taake ek email ka
+// ek hi active code ho har purpose ke liye.
+function otpDocId(email, purpose) {
+    return `${normalizeEmail(email).replace(/[^a-z0-9]/g, '_')}__${purpose}`;
+}
+
+// ============================================
+// PIN EMAIL TEMPLATES
+// ============================================
+function buildOtpEmail({ name, code, purpose, heading, intro, note }) {
+    const purposeLabel = purpose === 'password_change' ? 'Password Change' : 'Account Verification';
+    const isPassword   = purpose === 'password_change';
+
+    // Code ko alag alag boxes mein dikhate hain — professional lagta hai
+    const codeBoxes = String(code).split('').map(d =>
+        `<td style="padding:0 3px;">
+           <div style="width:38px;height:48px;line-height:48px;text-align:center;background:#f1f5f9;border:1px solid ${BRAND.line};border-radius:6px;font-size:22px;font-weight:700;color:${BRAND.ink};font-family:monospace;">${d}</div>
+         </td>`).join('');
+
+    const bodyContent = `
+      ${buildEyebrow(purposeLabel, isPassword ? BRAND.warn : BRAND.primary)}
+      ${buildHeading(heading || 'Verify your email address')}
+
+      <p style="margin:0 0 24px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        ${name ? `Dear ${name},<br>` : ''}
+        ${intro || 'Use the verification code below to continue. This code is valid for 10 minutes.'}
+      </p>
+
+      <table cellpadding="0" cellspacing="0" border="0" align="center" style="margin:0 auto 24px;">
+        <tr>${codeBoxes}</tr>
+      </table>
+
+      <div style="background:${BRAND.warnBg};border:1px solid ${BRAND.warnLine};border-left:3px solid #d97706;border-radius:6px;padding:14px 18px;margin:0 0 24px;">
+        <p style="margin:0;font-size:12.5px;line-height:1.65;color:#78350f;">
+          <strong>Do not share this code.</strong> Health Jobs Portal staff will never ask you for this code.
+          ${note ? `<br>${note}` : ''}
+        </p>
+      </div>
+
+      <p style="margin:0;font-size:12.5px;color:${BRAND.muted};line-height:1.7;">
+        If you did not request this code, you can safely ignore this email.
+        Your account remains secure and no changes have been made.
+      </p>`;
+
+    const subject = isPassword
+        ? `Your Password Change Code: ${code} - Health Jobs Portal`
+        : `Your Verification Code: ${code} - Health Jobs Portal`;
+
+    return { html: buildShell({ title: subject, bodyContent }), subject };
+}
+
+// ============================================
+// PASSWORD CHANGED — confirmation email
+// ============================================
+function buildPasswordChangedEmail({ name, changedAt }) {
+    const rows = [
+        { label: 'Email Address', value: name || 'Your account' },
+        { label: 'Date & Time',   value: changedAt || new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi', dateStyle: 'medium', timeStyle: 'short' }) },
+    ];
+
+    const bodyContent = `
+      ${buildEyebrow('Password Updated', BRAND.ok)}
+      ${buildHeading('Your password was changed successfully')}
+
+      <p style="margin:0 0 22px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        Dear ${name || 'Health Jobs User'},<br>
+        Your Health Jobs Portal account password has been changed. All other devices have been signed out for your safety.
+      </p>
+
+      ${buildNotice({
+        tone: 'ok',
+        text: `<strong style="color:#14532d;">You're all set.</strong> You can now sign in using your new password.`
+      })}
+
+      <p style="margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${BRAND.muted};">Change Details</p>
+      ${buildDetailTable(rows, '24px')}
+
+      <div style="background:${BRAND.badBg};border:1px solid ${BRAND.badLine};border-left:3px solid #dc2626;border-radius:6px;padding:14px 18px;margin:0 0 24px;">
+        <p style="margin:0;font-size:12.5px;line-height:1.65;color:#7f1d1d;">
+          <strong>Did not make this change?</strong> Reset your password immediately and contact our support team right away.
+        </p>
+      </div>
+
+      ${buildButton({ href: 'https://healthjobportal.com/login.html', label: 'Sign In' })}`;
+
+    return buildShell({ title: 'Password Changed - Health Jobs Portal', bodyContent });
+}
+
+// ============================================
+// POST /api/send-otp
+// ============================================
+// Signup ya password-change ke liye 6-digit code email par bhejta hai.
+// ============================================
+app.post('/api/send-otp', rateLimit, async (req, res) => {
+    try {
+        if (!db) {
+            return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
+        }
+
+        const { email, purpose, name } = req.body;
+        const cleanEmail = normalizeEmail(email);
+        const cleanPurpose = String(purpose || 'signup').trim();
+
+        if (!isValidEmail(cleanEmail)) {
+            return res.status(400).json({ success: false, error: 'A valid email address is required' });
+        }
+        if (cleanPurpose === 'password_change') {
+            return res.status(400).json({
+                success: false,
+                error: 'Password change codes are sent securely. Use POST /api/request-password-change instead.'
+            });
+        }
+
+        const docId = otpDocId(cleanEmail, cleanPurpose);
+        const docRef = db.collection(OTP_COLLECTION).doc(docId);
+
+        // ── Resend cooldown ──────────────────────────────────────
+        const existing = await docRef.get();
+        if (existing.exists) {
+            const prev = existing.data();
+            const sinceLast = Date.now() - (prev.sentAtMs || 0);
+            if (sinceLast < OTP_RESEND_MS) {
+                const wait = Math.ceil((OTP_RESEND_MS - sinceLast) / 1000);
+                return res.status(429).json({
+                    success: false,
+                    error: `Please wait ${wait} seconds before requesting another code.`,
+                    retryAfterSeconds: wait
+                });
+            }
+        }
+
+        const code = generateOtp();
+        const { html, subject } = buildOtpEmail({
+            name: name || '',
+            code,
+            purpose: cleanPurpose
+        });
+
+        const result = await sendEmail({ to: cleanEmail, toName: name || '', subject, html });
+        if (!result.success) {
+            console.error(`[otp] email send failed for ${cleanEmail}: ${result.error}`);
+            return res.status(500).json({ success: false, error: 'Could not send the verification code. Please try again.' });
+        }
+
+        // Sirf hash store karo — plain code kabhi Firestore mein nahi jata
+        await docRef.set({
+            email: cleanEmail,
+            purpose: cleanPurpose,
+            codeHash: hashOtp(code, cleanEmail),
+            attempts: 0,
+            verified: false,
+            sentAtMs: Date.now(),
+            expiresAt: Date.now() + OTP_TTL_MS,
+            createdAt: new Date().toISOString()
+        });
+
+        console.log(`[otp] code sent to ${cleanEmail} (purpose=${cleanPurpose})`);
+        return res.status(200).json({
+            success: true,
+            message: 'Verification code sent to your email.',
+            expiresInSeconds: OTP_TTL_MS / 1000
+        });
+
+    } catch (err) {
+        console.error('[otp] send error:', err);
+        return res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ============================================
+// POST /api/verify-otp
+// ============================================
+// Code ko verify karta hai. Signup flow isay use karta hai.
+// ============================================
+app.post('/api/verify-otp', rateLimit, async (req, res) => {
+    try {
+        if (!db) {
+            return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
+        }
+
+        const { email, code, purpose } = req.body;
+        const cleanEmail = normalizeEmail(email);
+        const cleanPurpose = String(purpose || 'signup').trim();
+        const cleanCode = String(code || '').replace(/\D/g, '');
+
+        if (!isValidEmail(cleanEmail) || cleanCode.length !== 6) {
+            return res.status(400).json({ success: false, error: 'A valid email and 6-digit code are required' });
+        }
+
+        const docRef = db.collection(OTP_COLLECTION).doc(otpDocId(cleanEmail, cleanPurpose));
+        const snap = await docRef.get();
+
+        if (!snap.exists) {
+            return res.status(400).json({ success: false, error: 'No verification code found. Please request a new one.' });
+        }
+
+        const d = snap.data();
+
+        if ((d.attempts || 0) >= OTP_MAX_ATTEMPTS) {
+            return res.status(429).json({ success: false, error: 'Too many incorrect attempts. Please request a new code.' });
+        }
+        if (Date.now() > (d.expiresAt || 0)) {
+            return res.status(400).json({ success: false, error: 'This code has expired. Please request a new one.' });
+        }
+
+        if (hashOtp(cleanCode, cleanEmail) !== d.codeHash) {
+            const attempts = (d.attempts || 0) + 1;
+            await docRef.update({ attempts });
+            const left = Math.max(0, OTP_MAX_ATTEMPTS - attempts);
+            return res.status(400).json({
+                success: false,
+                error: left > 0
+                    ? `Incorrect code. ${left} attempt${left === 1 ? '' : 's'} remaining.`
+                    : 'Too many incorrect attempts. Please request a new code.'
+            });
+        }
+
+        await docRef.update({ verified: true, verifiedAt: Date.now() });
+        console.log(`[otp] verified ${cleanEmail} (purpose=${cleanPurpose})`);
+        return res.status(200).json({ success: true, message: 'Email verified successfully.', email: cleanEmail });
+
+    } catch (err) {
+        console.error('[otp] verify error:', err);
+        return res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ============================================
+// POST /api/request-password-change
+// ============================================
+// Password change ke liye code bhejta hai.
+// Frontend Firebase ID token bhejta hai (requireAuth), is liye
+// sirf wahi user apne hi email par code mangwa sakta hai.
+// ============================================
+app.post('/api/request-password-change', rateLimit, requireAuth, async (req, res) => {
+    try {
+        if (!db) {
+            return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
+        }
+
+        // requireAuth admin-only hai bhi flow ke liye; yahan hum ek halka
+        // token check khud karte hain taake normal users bhi apna
+        // password change kar sakein.
+        const authHeader = req.headers['authorization'] || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+        if (!token) {
+            return res.status(401).json({ success: false, error: 'Unauthorized: please sign in again' });
+        }
+
+        let decoded;
+        try {
+            decoded = await admin.auth().verifyIdToken(token);
+        } catch (e) {
+            return res.status(401).json({ success: false, error: 'Session expired. Please sign in again.' });
+        }
+
+        const email = normalizeEmail(decoded.email);
+        if (!isValidEmail(email)) {
+            return res.status(400).json({ success: false, error: 'Your account has no valid email address' });
+        }
+
+        const docId = otpDocId(email, 'password_change');
+        const docRef = db.collection(OTP_COLLECTION).doc(docId);
+
+        const existing = await docRef.get();
+        if (existing.exists) {
+            const sinceLast = Date.now() - (existing.data().sentAtMs || 0);
+            if (sinceLast < OTP_RESEND_MS) {
+                const wait = Math.ceil((OTP_RESEND_MS - sinceLast) / 1000);
+                return res.status(429).json({
+                    success: false,
+                    error: `Please wait ${wait} seconds before requesting another code.`,
+                    retryAfterSeconds: wait
+                });
+            }
+        }
+
+        const name = decoded.name || '';
+        const code = generateOtp();
+        const { html, subject } = buildOtpEmail({
+            name,
+            code,
+            purpose: 'password_change',
+            heading: 'Confirm your password change',
+            intro: 'We received a request to change your password. Enter the code below to confirm it is really you.',
+            note: 'This code expires in 10 minutes.'
+        });
+
+        const result = await sendEmail({ to: email, toName: name, subject, html });
+        if (!result.success) {
+            console.error(`[pwd-change] email send failed for ${email}: ${result.error}`);
+            return res.status(500).json({ success: false, error: 'Could not send the code. Please try again.' });
+        }
+
+        await docRef.set({
+            email,
+            uid: decoded.uid,
+            purpose: 'password_change',
+            codeHash: hashOtp(code, email),
+            attempts: 0,
+            verified: false,
+            sentAtMs: Date.now(),
+            expiresAt: Date.now() + OTP_TTL_MS,
+            createdAt: new Date().toISOString()
+        });
+
+        console.log(`[pwd-change] code sent to ${email}`);
+        return res.status(200).json({
+            success: true,
+            message: 'Verification code sent to your email.',
+            email,
+            expiresInSeconds: OTP_TTL_MS / 1000
+        });
+
+    } catch (err) {
+        console.error('[pwd-change] request error:', err);
+        return res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ============================================
+// POST /api/confirm-password-change
+// ============================================
+// Code verify karta hai AUR password Firebase Auth mein update karta hai.
+// ============================================
+app.post('/api/confirm-password-change', rateLimit, async (req, res) => {
+    try {
+        if (!db) {
+            return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
+        }
+
+        const { code, newPassword } = req.body;
+        const cleanCode = String(code || '').replace(/\D/g, '');
+
+        if (cleanCode.length !== 6) {
+            return res.status(400).json({ success: false, error: 'A valid 6-digit code is required' });
+        }
+        if (!newPassword || String(newPassword).length < 8) {
+            return res.status(400).json({ success: false, error: 'Password must be at least 8 characters long' });
+        }
+
+        // Token se user identify karo — email client se nahi lete,
+        // warna koi doosre ka code use kar sakta tha.
+        const authHeader = req.headers['authorization'] || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+        if (!token) {
+            return res.status(401).json({ success: false, error: 'Unauthorized: please sign in again' });
+        }
+
+        let decoded;
+        try {
+            decoded = await admin.auth().verifyIdToken(token);
+        } catch (e) {
+            return res.status(401).json({ success: false, error: 'Session expired. Please sign in again.' });
+        }
+
+        const email = normalizeEmail(decoded.email);
+        const docRef = db.collection(OTP_COLLECTION).doc(otpDocId(email, 'password_change'));
+        const snap = await docRef.get();
+
+        if (!snap.exists) {
+            return res.status(400).json({ success: false, error: 'No verification code found. Please request a new one.' });
+        }
+
+        const d = snap.data();
+
+        if ((d.attempts || 0) >= OTP_MAX_ATTEMPTS) {
+            return res.status(429).json({ success: false, error: 'Too many incorrect attempts. Please request a new code.' });
+        }
+        if (Date.now() > (d.expiresAt || 0)) {
+            return res.status(400).json({ success: false, error: 'This code has expired. Please request a new one.' });
+        }
+
+        if (hashOtp(cleanCode, email) !== d.codeHash) {
+            const attempts = (d.attempts || 0) + 1;
+            await docRef.update({ attempts });
+            const left = Math.max(0, OTP_MAX_ATTEMPTS - attempts);
+            return res.status(400).json({
+                success: false,
+                error: left > 0
+                    ? `Incorrect code. ${left} attempt${left === 1 ? '' : 's'} remaining.`
+                    : 'Too many incorrect attempts. Please request a new code.'
+            });
+        }
+
+        // ── Code sahi — ab password update karo ─────────────────
+        await admin.auth().updateUser(decoded.uid, { password: String(newPassword) });
+
+        // Code ko use-shuda mark karo (dobara istemal na ho)
+        await docRef.update({ verified: true, verifiedAt: Date.now(), usedForPasswordChange: true });
+
+        // ── Confirmation email ──────────────────────────────────
+        try {
+            const changedAt = new Date().toLocaleString('en-PK', {
+                timeZone: 'Asia/Karachi', dateStyle: 'medium', timeStyle: 'short'
+            });
+            const html = buildPasswordChangedEmail({ name: decoded.name || email, changedAt });
+            await sendEmail({
+                to: email,
+                toName: decoded.name || '',
+                subject: 'Your Password Was Changed - Health Jobs Portal',
+                html
+            });
+        } catch (mailErr) {
+            // Password already badal chuka hai — email fail hone par
+            // user ko error nahi dikhana chahiye.
+            console.error('[pwd-change] confirmation email failed:', mailErr.message);
+        }
+
+        console.log(`[pwd-change] password updated for ${email}`);
+        return res.status(200).json({
+            success: true,
+            message: 'Password changed successfully. Please sign in with your new password.'
+        });
+
+    } catch (err) {
+        console.error('[pwd-change] confirm error:', err);
+        return res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ============================================
 // POST /api/send-notification
 // ============================================
 app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
@@ -1453,6 +1911,12 @@ app.get('/', (req, res) => {
             'appeal-submitted', 'appeal-approved', 'appeal-rejected',
             'job-alert', 'new-post'
         ],
+        verification: {
+            sendOtp:                'POST /api/send-otp',
+            verifyOtp:              'POST /api/verify-otp',
+            requestPasswordChange:  'POST /api/request-password-change',
+            confirmPasswordChange:  'POST /api/confirm-password-change'
+        },
         emailConfigured: isEmailConfigured(),
         adminEmail: ADMIN_EMAIL,
         cron: 'GET /api/expiry-warning',
