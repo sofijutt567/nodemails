@@ -176,7 +176,7 @@ async function sendEmail({ to, toName, subject, html }) {
                 },
                 body: JSON.stringify({
                     sender: { name: fromName, email: fromEmail },
-                    to: [{ email: to, name: toName || '' }],
+                    to: [{ email: to, name: toName || 'Health Jobs User' }],
                     subject: subject,
                     htmlContent: html
                 }),
