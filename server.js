@@ -901,10 +901,39 @@ function buildExpiryEmail({ posterName, postTitle, expiryDate }) {
 // ============================================
 const crypto = require('crypto');
 
-const OTP_TTL_MS        = 10 * 60 * 1000;  // 10 minutes
-const OTP_MAX_ATTEMPTS  = 5;                // 5 wrong tries → locked
+const OTP_TTL_MS        = 2 * 60 * 1000;   // 2 minutes — itna hi valid hai PIN
+const OTP_MAX_ATTEMPTS  = 5;                // 5 wrong tries → lock
 const OTP_RESEND_MS     = 60 * 1000;        // 60 seconds resend cooldown
 const OTP_COLLECTION    = 'otp_codes';
+
+// Har email par ghair-zaroori PIN requests ko rokne ke liye
+// (Firestore reads bachane ke liye yeh in-memory hai)
+const otpRequestLog = new Map();            // email -> [timestamps]
+const OTP_REQ_WINDOW_MS = 30 * 60 * 1000;   // 30 minutes
+const OTP_REQ_MAX       = 6;                // 30 min mein max 6 PIN emails
+
+// 🔒 LOCKOUT — bar bar fail hone par PIN verification band
+// Fail level ke hisaab se escalating cooldown.
+const LOCK_LEVELS = [
+    { fails: 3,  ms: 2 * 60 * 60 * 1000, label: '2 hours' },
+    { fails: 6,  ms: 3 * 60 * 60 * 1000, label: '3 hours' },
+    { fails: 10, ms: 5 * 60 * 60 * 1000, label: '5 hours' }
+];
+
+function lockForFails(failCount) {
+    let chosen = null;
+    for (const lvl of LOCK_LEVELS) {
+        if (failCount >= lvl.fails) chosen = lvl;
+    }
+    return chosen;
+}
+
+function humanizeMs(ms) {
+    const mins = Math.ceil(ms / 60000);
+    if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'}`;
+    const hrs = Math.ceil(mins / 60);
+    return `${hrs} hour${hrs === 1 ? '' : 's'}`;
+}
 
 function hashOtp(code, email) {
     return crypto
@@ -1015,11 +1044,199 @@ function buildPasswordChangedEmail({ name, changedAt }) {
 }
 
 // ============================================
-// POST /api/send-otp
+// 🔐 INTERNAL SECRET GATE — signup PIN routes
 // ============================================
-// Signup ya password-change ke liye 6-digit code email par bhejta hai.
+// Signup ke PIN sirf aapki site (via nodemails / employee.html / candidate2.html)
+// se aane chahiye. Is liye in routes par internal secret lazmi hai.
+// Frontend INTERNAL_SECRET bhejta hai (wahi key jo admin panel use karta hai)
+// ya admin secret — dono accept karte hain taake testing aasan rahe.
 // ============================================
-app.post('/api/send-otp', rateLimit, async (req, res) => {
+const SIGNUP_SECRET = process.env.SIGNUP_SECRET || process.env.INTERNAL_SECRET || 'hjp-internal-2026';
+const ADMIN_PANEL_SECRET = process.env.ADMIN_SECRET || 'hj-admin-2024-xK9m';
+
+function providedSignupSecret(req) {
+    return String(
+        req.headers['x-internal-secret'] ||
+        req.headers['x-admin-secret'] ||
+        req.body?.secret ||
+        req.query?.secret ||
+        ''
+    );
+}
+
+function requireSignupSecret(req, res, next) {
+    const provided = providedSignupSecret(req);
+    if (provided !== SIGNUP_SECRET && provided !== ADMIN_PANEL_SECRET) {
+        console.warn(`[otp] rejected — bad secret, ip=${req.ip}`);
+        return res.status(401).json({ success: false, error: 'Unauthorized: invalid or missing secret key' });
+    }
+    next();
+}
+
+// Per-email request throttle — koi ek email par bar bar PIN na mangwaye
+function checkOtpRequestRate(email) {
+    const now = Date.now();
+    const key = normalizeEmail(email);
+    let list = (otpRequestLog.get(key) || []).filter(t => now - t < OTP_REQ_WINDOW_MS);
+    if (list.length >= OTP_REQ_MAX) {
+        const waitMs = OTP_REQ_WINDOW_MS - (now - list[0]);
+        return { allowed: false, retryAfterSeconds: Math.ceil(waitMs / 1000) };
+    }
+    list.push(now);
+    otpRequestLog.set(key, list);
+
+    // memory cleanup
+    if (otpRequestLog.size > 2000) {
+        for (const [k, v] of otpRequestLog) {
+            if (!v.some(t => now - t < OTP_REQ_WINDOW_MS)) otpRequestLog.delete(k);
+        }
+    }
+    return { allowed: true };
+}
+
+// ============================================
+// PIN LOCKED — notification email
+// ============================================
+// Jab user bar bar ghalat PIN dale aur verification lock ho jaye,
+// tab yeh email jati hai. Isi email ke through user ko pata chalta hai
+// ke lock kab khulega.
+// ============================================
+function buildPinLockedEmail({ name, email, lockLabel, failCount }) {
+    const rows = [
+        { label: 'Account', value: email || 'Your account' },
+        { label: 'Failed Attempts', value: String(failCount || '') },
+        { label: 'Lock Duration', value: lockLabel || '2 hours' },
+        { label: 'Locked At', value: new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi', dateStyle: 'medium', timeStyle: 'short' }) },
+    ];
+
+    const bodyContent = `
+      ${buildEyebrow('Security Alert', BRAND.bad)}
+      ${buildHeading('Email verification temporarily locked')}
+
+      <p style="margin:0 0 22px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        Dear ${name || 'Health Jobs User'},<br>
+        We detected several incorrect verification codes entered for your account.
+        To protect your account, email verification has been temporarily locked.
+      </p>
+
+      ${buildNotice({
+        tone: 'bad',
+        text: `<strong style="color:#7f1d1d;">Verification locked for ${lockLabel || '2 hours'}.</strong><br>You will be able to verify your email again automatically after this period. No action is needed from you right now.`
+      })}
+
+      <p style="margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${BRAND.muted};">Security Details</p>
+      ${buildDetailTable(rows, '24px')}
+
+      <p style="margin:0 0 22px;font-size:13px;color:${BRAND.body};line-height:1.7;">
+        If this was you, please wait until the lock expires and try again with a fresh code.
+        If this was <strong>not</strong> you, someone may be trying to access your account — we recommend
+        changing your password once the lock is lifted.
+      </p>
+
+      ${buildButton({ href: 'https://healthjobportal.com/login.html', label: 'Go to Login' })}`;
+
+    return {
+        html: buildShell({ title: 'Email Verification Locked - Health Jobs Portal', bodyContent }),
+        subject: `Security Alert: Email verification locked for ${lockLabel || '2 hours'}`
+    };
+}
+
+// ============================================
+// SIGNUP COMPLETE — Candidate
+// ============================================
+// Candidate account ban gaya — sirf user ko success email.
+// ============================================
+function buildCandidateSignupSuccessEmail({ name, profession, city, country, contactPhone, highestQualification, experienceYears }) {
+    const location = [city, country].filter(Boolean).join(', ') || 'Not specified';
+    const rows = [
+        ...(profession ? [{ label: 'Profession', value: profession }] : []),
+        ...(highestQualification ? [{ label: 'Qualification', value: highestQualification }] : []),
+        ...(experienceYears ? [{ label: 'Experience', value: experienceYears }] : []),
+        { label: 'Location', value: location },
+        ...(contactPhone ? [{ label: 'Phone', value: contactPhone }] : []),
+    ];
+
+    const bodyContent = `
+      ${buildEyebrow('Registration Successful', BRAND.ok)}
+      ${buildHeading(`Welcome aboard, ${name || 'Healthcare Professional'}`)}
+
+      <p style="margin:0 0 22px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        Your candidate account on <strong>Health Jobs Portal</strong> has been created and your email address is now verified.
+        You can start browsing and applying for healthcare jobs across Pakistan right away.
+      </p>
+
+      ${buildNotice({
+        tone: 'ok',
+        text: `<strong style="color:#14532d;">Your account is active.</strong> Job alerts matching your profile will be emailed to you automatically.`
+      })}
+
+      ${rows.length ? `
+      <p style="margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${BRAND.muted};">Your Profile</p>
+      ${buildDetailTable(rows, '26px')}` : ''}
+
+      <p style="margin:0 0 24px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        You can manage your job alert preferences any time from your account settings.
+      </p>
+
+      ${buildButton({ href: 'https://healthjobportal.com/index.html', label: 'Browse Jobs' })}`;
+
+    return {
+        html: buildShell({ title: 'Welcome to Health Jobs Portal', bodyContent }),
+        subject: 'Your Health Jobs Portal account is ready'
+    };
+}
+
+// ============================================
+// SIGNUP COMPLETE — Employer (user-facing review email)
+// ============================================
+// Employer ko yeh jati hai: account ban gaya, review ho raha hai.
+// (Admin ko alag approval-request email jati hai.)
+// ============================================
+function buildEmployerSignupReviewEmail({ name, facilityType, ownershipType, city, country, contactPerson, contactPhone }) {
+    const location = [city, country].filter(Boolean).join(', ') || 'Not specified';
+    const rows = [
+        ...(facilityType ? [{ label: 'Facility Type', value: facilityType }] : []),
+        ...(ownershipType ? [{ label: 'Ownership', value: ownershipType }] : []),
+        { label: 'Location', value: location },
+        ...(contactPerson ? [{ label: 'Contact Person', value: contactPerson }] : []),
+        ...(contactPhone ? [{ label: 'Contact Phone', value: contactPhone }] : []),
+    ];
+
+    const bodyContent = `
+      ${buildEyebrow('Under Review', BRAND.warn)}
+      ${buildHeading('Your facility account has been created')}
+
+      <p style="margin:0 0 22px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        Dear ${name || 'there'},<br>
+        Thank you for registering your facility on <strong>Health Jobs Portal</strong>.
+        Your email address has been verified successfully.
+      </p>
+
+      ${buildNotice({
+        tone: 'warn',
+        text: `<strong style="color:#78350f;">Your account is currently under review.</strong><br>Our team verifies every facility before it goes live. This usually takes less than 24 hours, and we will email you as soon as a decision is made.`
+      })}
+
+      ${rows.length ? `
+      <p style="margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${BRAND.muted};">Submitted Details</p>
+      ${buildDetailTable(rows, '26px')}` : ''}
+
+      <p style="margin:0 0 24px;font-size:13px;color:${BRAND.body};line-height:1.7;">
+        <strong>While under review</strong>, you will not be able to publish job posts or interact with posts until
+        your account is approved. You will receive a separate email the moment your account is approved.
+      </p>
+
+      ${buildButton({ href: 'https://healthjobportal.com/index.html', label: 'Go to Dashboard' })}`;
+
+    return {
+        html: buildShell({ title: 'Facility Account Under Review - Health Jobs Portal', bodyContent }),
+        subject: 'Your facility account is under review'
+    };
+}
+
+// Signup ke liye 6-digit PIN email par bhejta hai.
+// ============================================
+app.post('/api/send-otp', rateLimit, requireSignupSecret, async (req, res) => {
     try {
         if (!db) {
             return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
@@ -1042,27 +1259,44 @@ app.post('/api/send-otp', rateLimit, async (req, res) => {
         const docId = otpDocId(cleanEmail, cleanPurpose);
         const docRef = db.collection(OTP_COLLECTION).doc(docId);
 
-        // ── Resend cooldown ──────────────────────────────────────
+        // ── Single Firestore read — lock + resend + fail-count sab isi se ──
         const existing = await docRef.get();
-        if (existing.exists) {
-            const prev = existing.data();
-            const sinceLast = Date.now() - (prev.sentAtMs || 0);
-            if (sinceLast < OTP_RESEND_MS) {
-                const wait = Math.ceil((OTP_RESEND_MS - sinceLast) / 1000);
-                return res.status(429).json({
-                    success: false,
-                    error: `Please wait ${wait} seconds before requesting another code.`,
-                    retryAfterSeconds: wait
-                });
-            }
+        const prev = existing.exists ? existing.data() : null;
+        const now = Date.now();
+
+        // 🔒 LOCKOUT check — bar bar fail hone par PIN band
+        if (prev && prev.lockedUntil && now < prev.lockedUntil) {
+            const waitMs = prev.lockedUntil - now;
+            return res.status(423).json({
+                success: false,
+                locked: true,
+                error: `PIN verification is temporarily locked due to too many failed attempts. Please try again in ${humanizeMs(waitMs)}.`,
+                retryAfterSeconds: Math.ceil(waitMs / 1000)
+            });
+        }
+
+        // ── Resend cooldown ──────────────────────────────────
+        if (prev && (now - (prev.sentAtMs || 0)) < OTP_RESEND_MS) {
+            const wait = Math.ceil((OTP_RESEND_MS - (now - prev.sentAtMs)) / 1000);
+            return res.status(429).json({
+                success: false,
+                error: `Please wait ${wait} seconds before requesting another code.`,
+                retryAfterSeconds: wait
+            });
+        }
+
+        // ── Per-email throttle (bar bar requests rokne ke liye) ──
+        const rl = checkOtpRequestRate(cleanEmail);
+        if (!rl.allowed) {
+            return res.status(429).json({
+                success: false,
+                error: 'Too many verification codes requested for this email. Please try again a little later.',
+                retryAfterSeconds: rl.retryAfterSeconds
+            });
         }
 
         const code = generateOtp();
-        const { html, subject } = buildOtpEmail({
-            name: name || '',
-            code,
-            purpose: cleanPurpose
-        });
+        const { html, subject } = buildOtpEmail({ name: name || '', code, purpose: cleanPurpose });
 
         const result = await sendEmail({ to: cleanEmail, toName: name || '', subject, html });
         if (!result.success) {
@@ -1072,14 +1306,15 @@ app.post('/api/send-otp', rateLimit, async (req, res) => {
 
         // Sirf hash store karo — plain code kabhi Firestore mein nahi jata
         await docRef.set({
-            email: cleanEmail,
-            purpose: cleanPurpose,
-            codeHash: hashOtp(code, cleanEmail),
-            attempts: 0,
-            verified: false,
-            sentAtMs: Date.now(),
-            expiresAt: Date.now() + OTP_TTL_MS,
-            createdAt: new Date().toISOString()
+            email:        cleanEmail,
+            purpose:      cleanPurpose,
+            codeHash:     hashOtp(code, cleanEmail),
+            attempts:     prev?.attempts || 0,
+            failCount:    prev?.failCount || 0,
+            verified:     false,
+            sentAtMs:     now,
+            expiresAt:    now + OTP_TTL_MS,
+            createdAt:    new Date().toISOString()
         });
 
         console.log(`[otp] code sent to ${cleanEmail} (purpose=${cleanPurpose})`);
@@ -1100,7 +1335,7 @@ app.post('/api/send-otp', rateLimit, async (req, res) => {
 // ============================================
 // Code ko verify karta hai. Signup flow isay use karta hai.
 // ============================================
-app.post('/api/verify-otp', rateLimit, async (req, res) => {
+app.post('/api/verify-otp', rateLimit, requireSignupSecret, async (req, res) => {
     try {
         if (!db) {
             return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
@@ -1123,27 +1358,92 @@ app.post('/api/verify-otp', rateLimit, async (req, res) => {
         }
 
         const d = snap.data();
+        const now = Date.now();
+        const failCount = d.failCount || 0;
+
+        // 🔒 LOCKOUT — pehle check karo ke locked to nahi
+        if (d.lockedUntil && now < d.lockedUntil) {
+            const waitMs = d.lockedUntil - now;
+            return res.status(423).json({
+                success: false,
+                locked: true,
+                error: `Too many failed attempts. PIN verification is locked for ${humanizeMs(waitMs)}.`,
+                retryAfterSeconds: Math.ceil(waitMs / 1000)
+            });
+        }
+
+        // Lock ka waqt guzar gaya — counter reset karo
+        if (d.lockedUntil && now >= d.lockedUntil) {
+            await docRef.update({ lockedUntil: null, failCount: 0, attempts: 0 });
+            d.failCount = 0;
+            d.attempts = 0;
+        }
 
         if ((d.attempts || 0) >= OTP_MAX_ATTEMPTS) {
             return res.status(429).json({ success: false, error: 'Too many incorrect attempts. Please request a new code.' });
         }
-        if (Date.now() > (d.expiresAt || 0)) {
-            return res.status(400).json({ success: false, error: 'This code has expired. Please request a new one.' });
+        if (now > (d.expiresAt || 0)) {
+            return res.status(410).json({
+                success: false,
+                expired: true,
+                error: 'This code has expired. Please request a new one.'
+            });
         }
 
+        // ── GALAT CODE ────────────────────────────────────────
         if (hashOtp(cleanCode, cleanEmail) !== d.codeHash) {
             const attempts = (d.attempts || 0) + 1;
-            await docRef.update({ attempts });
+            const newFailCount = failCount + 1;
+            const update = { attempts, failCount: newFailCount, lastFailAt: now };
+
+            const lock = lockForFails(newFailCount);
+            if (lock) {
+                update.lockedUntil = now + lock.ms;
+                console.warn(`[otp] LOCKED ${cleanEmail} for ${lock.label} after ${newFailCount} fails`);
+
+                // 🔔 Lock hone par email — code fresh ho jata hai
+                try {
+                    const { html, subject } = buildPinLockedEmail({
+                        name: '',
+                        email: cleanEmail,
+                        lockLabel: lock.label,
+                        failCount: newFailCount
+                    });
+                    await sendEmail({ to: cleanEmail, subject, html });
+                } catch (mailErr) {
+                    console.error('[otp] lock email failed:', mailErr.message);
+                }
+            }
+
+            await docRef.update(update);
+
+            if (lock) {
+                return res.status(423).json({
+                    success: false,
+                    locked: true,
+                    error: `Too many failed attempts. PIN verification is now locked for ${lock.label}. A notification has been sent to your email.`,
+                    retryAfterSeconds: Math.ceil(lock.ms / 1000)
+                });
+            }
+
             const left = Math.max(0, OTP_MAX_ATTEMPTS - attempts);
             return res.status(400).json({
                 success: false,
                 error: left > 0
                     ? `Incorrect code. ${left} attempt${left === 1 ? '' : 's'} remaining.`
-                    : 'Too many incorrect attempts. Please request a new code.'
+                    : 'Too many incorrect attempts. Please request a new code.',
+                attemptsLeft: left
             });
         }
 
-        await docRef.update({ verified: true, verifiedAt: Date.now() });
+        // ── SAHI CODE ──────────────────────────────────────────
+        await docRef.update({
+            verified: true,
+            verifiedAt: now,
+            attempts: 0,
+            failCount: 0,
+            lockedUntil: null
+        });
         console.log(`[otp] verified ${cleanEmail} (purpose=${cleanPurpose})`);
         return res.status(200).json({ success: true, message: 'Email verified successfully.', email: cleanEmail });
 
@@ -1348,6 +1648,54 @@ app.post('/api/confirm-password-change', rateLimit, async (req, res) => {
 });
 
 // ============================================
+// 🔕 EMAIL ALERT OPT-IN CHECK
+// ============================================
+// Settings page se user "Email Job Alerts" ON/OFF kar sakta hai.
+// Default = ON (jab tak user ne khud band na kiya ho).
+// Sirf ek Firestore read — quota friendly.
+// ============================================
+async function isEmailAlertOptedIn(uid) {
+    if (!uid || !db) return true;            // pata nahi to bhej do (default ON)
+    try {
+        const snap = await db.collection('users').doc(uid).get();
+        if (!snap.exists) return true;
+        const prefs = snap.data()?.notificationPrefs;
+        if (!prefs) return true;             // prefs set nahi — default ON
+        return prefs.emailJobAlerts !== false && prefs.notifications !== false;
+    } catch (e) {
+        console.error('[prefs] opt-in check failed for', uid, ':', e.message);
+        return true;                          // fail-open — user ko email milne se na roko
+    }
+}
+
+// ============================================
+// ADMIN BROADCAST EMAIL TEMPLATE
+// ============================================
+// Admin panel se kisi bhi user ko custom email bhejne ke liye.
+// ============================================
+function buildAdminBroadcastEmail({ title, heading, message, ctaLabel, ctaUrl, footerNote, userName }) {
+    const safeMsg = String(message || '')
+        .split(/\n+/)
+        .filter(Boolean)
+        .map(p => `<p style="margin:0 0 14px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">${p}</p>`)
+        .join('');
+
+    const bodyContent = `
+      ${buildEyebrow(title || 'Message from Health Jobs', BRAND.primary)}
+      ${buildHeading(heading || 'A message from our team')}
+
+      ${userName ? `<p style="margin:0 0 16px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">Dear ${userName},</p>` : ''}
+
+      ${safeMsg}
+
+      ${ctaUrl && ctaLabel ? `<div style="margin:24px 0 8px;">${buildButton({ href: ctaUrl, label: ctaLabel })}</div>` : ''}
+
+      ${footerNote ? `<p style="margin:20px 0 0;font-size:12px;color:${BRAND.muted};line-height:1.7;">${footerNote}</p>` : ''}`;
+
+    return buildShell({ title: heading || 'Message from Health Jobs Portal', bodyContent });
+}
+
+// ============================================
 // POST /api/send-notification
 // ============================================
 app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
@@ -1358,7 +1706,12 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
             jobTitle, jobLocation, jobLink, matchScore
         } = req.body;
 
-        // TYPE 1: WELCOME EMAIL
+        // ───────────────────────────────────────────────
+        // TYPE 1: SIGNUP COMPLETE EMAILS
+        // Candidate  → sirf user ko success email
+        // Employer   → user ko "under review" email
+        //              + admin ko approval-request email
+        // ───────────────────────────────────────────────
         if (type === 'welcome') {
             if (!email || !name) {
                 return res.status(400).json({ success: false, error: 'Email and name required' });
@@ -1368,21 +1721,22 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
                 city, country, contactPhone, facilityType, ownershipType, contactPerson
             } = req.body;
 
-            const html = buildWelcomeEmail({
-                name, role, profession, experienceYears, highestQualification,
-                city, country, contactPhone, facilityType, ownershipType, contactPerson
-            });
-            const result = await sendEmail({
-                to: email, toName: name,
-                subject: `Welcome to Health Jobs Portal, ${name}!`,
-                html
-            });
+            const isEmployer = role === 'employer';
 
-            // New employer accounts need admin approval — notify every admin.
-            // Awaited (not fire-and-forget) so a serverless freeze cannot kill
-            // the request before it leaves. sendAdminEmail never throws.
+            const { html, subject } = isEmployer
+                ? buildEmployerSignupReviewEmail({
+                    name, facilityType, ownershipType, city, country, contactPerson, contactPhone
+                  })
+                : buildCandidateSignupSuccessEmail({
+                    name, profession, experienceYears, highestQualification, city, country, contactPhone
+                  });
+
+            const result = await sendEmail({ to: email, toName: name, subject, html });
+
+            // Employer accounts need admin approval — admin ko notify karo.
+            // Candidate accounts: admin ko kuch nahi jata.
             let adminNotify = null;
-            if (role === 'employer') {
+            if (isEmployer) {
                 const adminHtml = buildAdminNotifyEmail({
                     facilityName: name, email, facilityType, ownershipType,
                     city, country, contactPerson, contactPhone
@@ -1391,12 +1745,28 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
                     subject: `New Employer Awaiting Approval: ${name}`,
                     html: adminHtml
                 });
-                console.log('[welcome] employer signup — admin notified:', adminNotify.recipients.join(', '),
+                console.log('[signup] employer — admin notified:', adminNotify.recipients.join(', '),
                     adminNotify.failed.length ? ('failed: ' + adminNotify.failed.join(', ')) : '(all delivered)');
             }
 
+            // Signup email prefs bhi record karo (quota-friendly — ek write)
+            if (db) {
+                try {
+                    const usr = await db.collection('users').doc(req.user.uid).get();
+                    if (usr.exists && !usr.data()?.notificationPrefs) {
+                        await db.collection('users').doc(req.user.uid).set({
+                            notificationPrefs: {
+                                notifications:     true,
+                                emailJobAlerts:    true,
+                                pushNotifications: true
+                            }
+                        }, { merge: true });
+                    }
+                } catch (e) { console.error('[signup] pref init failed:', e.message); }
+            }
+
             return result.success
-                ? res.status(200).json({ success: true, message: 'Welcome email sent', adminNotify })
+                ? res.status(200).json({ success: true, message: isEmployer ? 'Review email sent' : 'Signup success email sent', adminNotify })
                 : res.status(500).json({ success: false, error: result.error, adminNotify });
         }
 
@@ -1485,10 +1855,24 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
         }
 
         // TYPE 2: JOB ALERT (Single User)
+        // 🔕 Sirf wahi users yeh email payenge jinhon ne settings mein
+        // "Email Job Alerts" ON rakha hai. (Default ON hai.)
         if (type === 'job-alert') {
             if (!email || !name || !jobTitle) {
                 return res.status(400).json({ success: false, error: 'Email, name, jobTitle required' });
             }
+
+            // Opt-in check — quota bachane ke liye Firestore read se pehle.
+            // Caller ne khud user ka pref bhej diya ho to wohi use karo.
+            let allowed = req.body.emailJobAlerts;
+            if (typeof allowed !== 'boolean') {
+                allowed = await isEmailAlertOptedIn(req.user.uid);
+            }
+            if (!allowed) {
+                console.log(`[job-alert] skipped ${email} — user opted out of email job alerts`);
+                return res.status(200).json({ success: true, skipped: true, reason: 'opted_out' });
+            }
+
             const rows = [
                 { label: 'Position', value: jobTitle },
                 { label: 'Location', value: jobLocation || 'Pakistan' }
@@ -1543,9 +1927,13 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
                 } catch (e) { console.error('Poster fetch error:', e.message); }
             }
 
-            // ── Already-sent log (single read) ───────────────
+            // ── Already-sent log ─────────────────────────────
+            // 📉 QUOTA: sirf `userId` field fetch karo, poori doc nahi.
+            // Masked query = har doc se 1 field = bara read saving.
             const logsSnap = await db.collection('email_logs')
-                .where('postId', '==', postId).get();
+                .where('postId', '==', postId)
+                .select('userId')
+                .get();
             const alreadySentUsers = new Set(logsSnap.docs.map(d => d.data().userId));
 
             // ── Parse post categories (array or comma-string) ─
@@ -1573,15 +1961,22 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
             const postLocAll = postLocLowers.length === 0; // no location = send to all
 
             // ── Firestore: fetch only the right role ──────────
-            // IMPORTANT: we query by role ONLY. Filtering on
-            // `accountStatus == 'approved'` in the query silently excluded every
-            // user that has no accountStatus field at all (candidates are stored
-            // without it) or that is still 'pending' — which is why related
-            // accounts never received alerts. Approval is now decided in code
-            // below, where a missing status is treated as approved.
+            // 📉 QUOTA OPTIMISATION:
+            //  1) Masked select — sirf wahi 8 fields jinki asal mein zaroorat hai
+            //     (pehle POORI user doc padhi jati thi).
+            //  2) Hard limit — ek post par max 1500 emails, taake quota na phate.
+            //  3) accountStatus filter query se hata diya (missing field wale
+            //     users ko silent-exclude kar deta tha). Approval neeche decide hoti hai.
             const targetRole = isEmployerPost ? 'candidate' : 'employer';
             const usersSnap = await db.collection('users')
                 .where('role', '==', targetRole)
+                .select(
+                    'email', 'fullName', 'facilityName', 'name', 'displayName',
+                    'category', 'profession', 'qualification',
+                    'city', 'location', 'accountStatus', 'isDeactivated',
+                    'notificationPrefs'
+                )
+                .limit(1500)
                 .get();
 
             if (usersSnap.empty) {
@@ -1599,6 +1994,19 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
                 if (!st) return true;              // no status field → eligible
                 if (st === 'approved' || st === 'active') return true;
                 return !BLOCKED_STATUSES.has(st);  // unknown value → eligible
+            }
+
+            // 🔕 EMAIL ALERT OPT-IN
+            // Settings page se user "Email Job Alerts" band kar sakta hai.
+            // Default = ON (jab tak prefs set na hon).
+            // ⚠️ Yeh koi extra Firestore read nahi karta — notificationPrefs
+            //    isi masked query mein already aa chuka hai.
+            function isEmailOptedIn(user) {
+                const prefs = user.notificationPrefs;
+                if (!prefs) return true;                 // prefs nahi → default ON
+                if (prefs.emailJobAlerts === false) return false;
+                if (prefs.notifications === false) return false;
+                return true;
             }
 
             // ── Helper: does user location match any post location ──
@@ -1632,7 +2040,7 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
             const logBatch = db.batch();
             let batchCount = 0;
             // Counters so a "0 sent" response is explainable from the logs alone.
-            const skipped = { noEmail: 0, isPoster: 0, alreadySent: 0, notEligible: 0, category: 0, location: 0, sendFailed: 0 };
+            const skipped = { noEmail: 0, isPoster: 0, alreadySent: 0, notEligible: 0, optedOut: 0, category: 0, location: 0, sendFailed: 0 };
             let flushErrorCount = 0;
 
             console.log(`[new-post] candidates: role=${targetRole}, fetched=${usersSnap.size}, alreadySent=${alreadySentUsers.size}`);
@@ -1645,6 +2053,9 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
                 if (userId === posterId) { skipped.isPoster++; continue; }
                 if (alreadySentUsers.has(userId)) { skipped.alreadySent++; continue; }
                 if (!isEligible(user)) { skipped.notEligible++; continue; }
+
+                // 🔕 Sirf wahi users jinho ne email alerts ON rakhe hain
+                if (!isEmailOptedIn(user)) { skipped.optedOut++; continue; }
 
                 // Category match
                 const userCatStr = user.category || user.profession || user.qualification || '';
@@ -1716,9 +2127,43 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
             });
         }
 
+        // TYPE 4: ADMIN BROADCAST / CUSTOM EMAIL
+        // Admin panel se kisi ek user ya poore segment ko custom email.
+        if (type === 'admin-broadcast') {
+            const { userName, heading, message, ctaLabel, ctaUrl, footerNote } = req.body;
+
+            if (!email || !isValidEmail(email)) {
+                return res.status(400).json({ success: false, error: 'A valid recipient email is required' });
+            }
+            if (!message || !String(message).trim()) {
+                return res.status(400).json({ success: false, error: 'Message body is required' });
+            }
+
+            const html = buildAdminBroadcastEmail({
+                title,
+                heading: heading || title,
+                message,
+                ctaLabel,
+                ctaUrl,
+                footerNote,
+                userName: userName || name
+            });
+
+            const result = await sendEmail({
+                to: email,
+                toName: userName || name || '',
+                subject: title || heading || 'Message from Health Jobs Portal',
+                html
+            });
+
+            return result.success
+                ? res.status(200).json({ success: true, message: 'Email sent', to: email })
+                : res.status(500).json({ success: false, error: result.error, to: email });
+        }
+
         return res.status(400).json({
             success: false,
-            error: 'Invalid type. Use: welcome, employer-approved, employer-rejected, appeal-submitted, appeal-approved, appeal-rejected, job-alert, or new-post'
+            error: 'Invalid type. Use: welcome, employer-approved, employer-rejected, appeal-submitted, appeal-approved, appeal-rejected, job-alert, new-post, or admin-broadcast'
         });
 
     } catch (err) {
@@ -1909,7 +2354,7 @@ app.get('/', (req, res) => {
         types: [
             'welcome', 'employer-approved', 'employer-rejected',
             'appeal-submitted', 'appeal-approved', 'appeal-rejected',
-            'job-alert', 'new-post'
+            'job-alert', 'new-post', 'admin-broadcast'
         ],
         verification: {
             sendOtp:                'POST /api/send-otp',
