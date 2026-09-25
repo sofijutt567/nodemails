@@ -1051,7 +1051,7 @@ function buildPasswordChangedEmail({ name, changedAt }) {
 // Frontend INTERNAL_SECRET bhejta hai (wahi key jo admin panel use karta hai)
 // ya admin secret — dono accept karte hain taake testing aasan rahe.
 // ============================================
-const SIGNUP_SECRET = process.env.SIGNUP_SECRET || process.env.INTERNAL_SECRET || 'hjp-internal-2026';
+const SIGNUP_SECRET = process.env.SIGNUP_SECRET || 'hjp-signup-74be4a33b96d';
 const ADMIN_PANEL_SECRET = process.env.ADMIN_SECRET || 'hj-admin-2024-xK9m';
 
 function providedSignupSecret(req) {
@@ -1065,6 +1065,15 @@ function providedSignupSecret(req) {
 }
 
 function requireSignupSecret(req, res, next) {
+    // Sirf apni site (Origin/Referer) se aane wali requests allow — Postman/curl
+    // se seedha secret use karke call nahi ho sakega.
+    const origin = req.headers['origin'] || req.headers['referer'] || '';
+    const originOk = ALLOWED_ORIGINS.some(o => origin.startsWith(o));
+    if (!originOk) {
+        console.warn(`[otp] rejected — bad/missing origin: "${origin}", ip=${req.ip}`);
+        return res.status(403).json({ success: false, error: 'Forbidden: invalid origin' });
+    }
+
     const provided = providedSignupSecret(req);
     if (provided !== SIGNUP_SECRET && provided !== ADMIN_PANEL_SECRET) {
         console.warn(`[otp] rejected — bad secret, ip=${req.ip}`);
