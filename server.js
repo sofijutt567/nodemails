@@ -1457,18 +1457,22 @@ app.post('/api/verify-otp', rateLimit, requireSignupSecret, async (req, res) => 
 // POST /api/request-password-change
 // ============================================
 // Password change ke liye code bhejta hai.
-// Frontend Firebase ID token bhejta hai (requireAuth), is liye
+// Frontend Firebase ID token bhejta hai, is liye
 // sirf wahi user apne hi email par code mangwa sakta hai.
+//
+// NOTE: Yahan jaan-boojh kar 'requireAuth' middleware use NAHI hota,
+// kyunke woh admin-only hai (sirf allowedAdmins list wale emails ko
+// pass karta hai, baaki sabko 403 "Forbidden: admin access only" de
+// deta hai). Har normal user (candidate/employee) ko apna password
+// change karne dena hai, is liye yeh route apna khud ka halka token
+// check neeche karta hai — koi admin-gate nahi.
 // ============================================
-app.post('/api/request-password-change', rateLimit, requireAuth, async (req, res) => {
+app.post('/api/request-password-change', rateLimit, async (req, res) => {
     try {
         if (!db) {
             return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
         }
 
-        // requireAuth admin-only hai bhi flow ke liye; yahan hum ek halka
-        // token check khud karte hain taake normal users bhi apna
-        // password change kar sakein.
         const authHeader = req.headers['authorization'] || '';
         const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
         if (!token) {
