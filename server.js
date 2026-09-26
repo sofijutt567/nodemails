@@ -1044,6 +1044,57 @@ function buildPasswordChangedEmail({ name, changedAt }) {
 }
 
 // ============================================
+// PASSWORD RESET LINK — email template
+// ============================================
+// "Forgot password" par 6-digit PIN nahi, balke ek reset LINK bhejte hain
+// (user apna naya password khud set karta hai).
+// NOTE: link mein Firebase ka oobCode hota hai jo Firestore mein save NAHI hota —
+// yeh sirf email ke through user tak jata hai.
+// ============================================
+function buildPasswordResetEmail({ name, resetLink, expiresIn }) {
+    const rows = [
+        { label: 'Account', value: name || 'Your account' },
+        { label: 'Link Validity', value: expiresIn || '1 hour' },
+        { label: 'Requested At', value: new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi', dateStyle: 'medium', timeStyle: 'short' }) },
+    ];
+
+    const bodyContent = `
+      ${buildEyebrow('Password Reset', BRAND.primary)}
+      ${buildHeading('Reset your Health Jobs Portal password')}
+
+      <p style="margin:0 0 22px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        Dear ${name || 'Health Jobs User'},<br>
+        We received a request to reset the password for your account. Click the button below to choose a new password.
+      </p>
+
+      ${buildNotice({
+        tone: 'warn',
+        text: `<strong style="color:#78350f;">This link can only be used once.</strong><br>For your security it expires shortly after it is requested. If it has expired, simply request a new one from the login page.`
+      })}
+
+      ${buildButton({ href: resetLink, label: 'Reset My Password' })}
+
+      <p style="margin:24px 0 10px;font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${BRAND.muted};">Request Details</p>
+      ${buildDetailTable(rows, '24px')}
+
+      <div style="background:${BRAND.badBg};border:1px solid ${BRAND.badLine};border-left:3px solid #dc2626;border-radius:6px;padding:14px 18px;margin:0 0 24px;">
+        <p style="margin:0;font-size:12.5px;line-height:1.65;color:#7f1d1d;">
+          <strong>Did not request this?</strong> You can safely ignore this email — your current password will keep working and no changes will be made.
+        </p>
+      </div>
+
+      <p style="margin:0;font-size:11.5px;color:${BRAND.muted};line-height:1.7;word-break:break-all;">
+        If the button does not work, copy and paste this address into your browser:<br>
+        <a href="${resetLink}" style="color:${BRAND.primary};">${resetLink}</a>
+      </p>`;
+
+    return {
+        html: buildShell({ title: 'Reset Your Password - Health Jobs Portal', bodyContent }),
+        subject: 'Reset your Health Jobs Portal password'
+    };
+}
+
+// ============================================
 // 🔐 INTERNAL SECRET GATE — signup PIN routes
 // ============================================
 // Signup ke PIN sirf aapki site (via nodemails / employee.html / candidate2.html)
@@ -1783,6 +1834,37 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
                 : res.status(500).json({ success: false, error: result.error, adminNotify });
         }
 
+        // ───────────────────────────────────────────────
+        // TYPE 0: PASSWORD RESET LINK (Forgot Password)
+        // Settings page se "Forgot Password" par 6-digit PIN ki jagah
+        // ek proper reset LINK bhejta hai.
+        // NOTE: email/name/resetLink settings page (client) se aate hain
+        // kyunke Firebase ka generatePasswordResetLink() client SDK mein
+        // mojood nahi — woh admin SDK ka function hai.
+        // ───────────────────────────────────────────────
+        if (type === 'password-reset') {
+            const { resetLink, expiresIn } = req.body;
+
+            if (!email || !isValidEmail(email)) {
+                return res.status(400).json({ success: false, error: 'A valid recipient email is required' });
+            }
+            if (!resetLink || !/^https:\/\//i.test(String(resetLink))) {
+                return res.status(400).json({ success: false, error: 'A valid reset link is required' });
+            }
+
+            const { html, subject } = buildPasswordResetEmail({
+                name: name || email,
+                resetLink: String(resetLink),
+                expiresIn
+            });
+
+            const result = await sendEmail({ to: email, toName: name || '', subject, html });
+
+            return result.success
+                ? res.status(200).json({ success: true, message: 'Password reset link sent', to: email })
+                : res.status(500).json({ success: false, error: result.error, to: email });
+        }
+
         // TYPE 1B: EMPLOYER APPROVED
         if (type === 'employer-approved') {
             if (!email || !name) {
@@ -2176,7 +2258,7 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
 
         return res.status(400).json({
             success: false,
-            error: 'Invalid type. Use: welcome, employer-approved, employer-rejected, appeal-submitted, appeal-approved, appeal-rejected, job-alert, new-post, or admin-broadcast'
+            error: 'Invalid type. Use: password-reset, welcome, employer-approved, employer-rejected, appeal-submitted, appeal-approved, appeal-rejected, job-alert, new-post, or admin-broadcast'
         });
 
     } catch (err) {
@@ -2365,7 +2447,7 @@ app.get('/', (req, res) => {
         version: '12.0.0',
         endpoint: 'POST /api/send-notification',
         types: [
-            'welcome', 'employer-approved', 'employer-rejected',
+            'password-reset', 'welcome', 'employer-approved', 'employer-rejected',
             'appeal-submitted', 'appeal-approved', 'appeal-rejected',
             'job-alert', 'new-post', 'admin-broadcast'
         ],
