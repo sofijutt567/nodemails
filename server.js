@@ -2438,6 +2438,84 @@ app.get('/api/expiry-warning', async (req, res) => {
 });
 
 // ============================================
+// POST /api/send-reset-link
+// ============================================
+// "Forgot Password" ke liye reset LINK wali email.
+//
+// ⚠️ YEH ROUTE JAAN-BOOJH KAR PUBLIC HAI (requireAuth NAHI lagta).
+// Wajah:
+//   1) /api/send-notification par requireAuth hai jo sirf admin emails ko
+//      allow karta hai — us par 403 "Forbidden: admin access only" aata tha,
+//      is liye aam user (candidate/employer) ka reset email kabhi nahi jata tha.
+//   2) Jo user apna password bhool gaya hai woh LOGIN NAHI kar sakta, is liye
+//      uske paas Firebase ID token hi nahi hota. Token maangna hi galat tha.
+//
+// 🔒 ABUSE SE BACHAO:
+//   • rateLimit (IP ke hisaab se)
+//   • resetLink sirf https par aur sirf apni site ke /reset-password.html par
+//   • resetLink mein email wahi honi chahiye jo request mein aayi hai
+//   • yahan koi Firestore read/write nahi hota
+//
+// NOTE: resetLink (jis mein Firebase ka oobCode hota hai) client par
+// sendPasswordResetEmail() se banta hai — Firebase ka admin SDK is project mein
+// init nahi hota (FIREBASE_SERVICE_ACCOUNT optional hai), is liye server
+// generatePasswordResetLink() use nahi kar sakta. Woh code Firestore mein
+// save NAHI hota aur sirf email ke through user tak jata hai.
+// ============================================
+app.post('/api/send-reset-link', rateLimit, async (req, res) => {
+    try {
+        const { email, name, resetLink } = req.body || {};
+        const cleanEmail = normalizeEmail(email);
+
+        if (!isValidEmail(cleanEmail)) {
+            return res.status(400).json({ success: false, error: 'A valid email address is required' });
+        }
+
+        const link = String(resetLink || '').trim();
+        if (!/^https:\/\//i.test(link)) {
+            return res.status(400).json({ success: false, error: 'A valid reset link is required' });
+        }
+
+        // Link apni hi site ke reset page ka hona chahiye (open-redirect / phishing se bachao)
+        let linkUrl;
+        try { linkUrl = new URL(link); }
+        catch (_) { return res.status(400).json({ success: false, error: 'Reset link could not be parsed' }); }
+
+        if (linkUrl.protocol !== 'https:') {
+            return res.status(400).json({ success: false, error: 'Reset link must use https' });
+        }
+        if (!/\/reset-password(\.html)?$/i.test(linkUrl.pathname)) {
+            return res.status(400).json({ success: false, error: 'Reset link must point to the reset-password page' });
+        }
+
+        // Link mein jo email hai wahi recipient hona chahiye
+        const linkEmail = normalizeEmail(linkUrl.searchParams.get('email') || '');
+        if (linkEmail && linkEmail !== cleanEmail) {
+            return res.status(400).json({ success: false, error: 'Reset link does not match the recipient email' });
+        }
+
+        const { html, subject } = buildPasswordResetEmail({
+            name: name || cleanEmail,
+            resetLink: link,
+            expiresIn: '1 hour'
+        });
+
+        const result = await sendEmail({ to: cleanEmail, toName: name || '', subject, html });
+        if (!result.success) {
+            console.error(`[reset-link] email send failed for ${cleanEmail}: ${result.error}`);
+            return res.status(500).json({ success: false, error: 'Could not send the reset link. Please try again.' });
+        }
+
+        console.log(`[reset-link] password reset link sent to ${cleanEmail}`);
+        return res.status(200).json({ success: true, message: 'Password reset link sent', to: cleanEmail });
+
+    } catch (err) {
+        console.error('[reset-link] error:', err);
+        return res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ============================================
 // HEALTH CHECK
 // ============================================
 app.get('/', (req, res) => {
@@ -2460,7 +2538,8 @@ app.get('/', (req, res) => {
         emailConfigured: isEmailConfigured(),
         adminEmail: ADMIN_EMAIL,
         cron: 'GET /api/expiry-warning',
-        health: 'GET /api/email-health'
+        health: 'GET /api/email-health',
+        resetLink: 'POST /api/send-reset-link'
     });
 });
 
