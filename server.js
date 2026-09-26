@@ -133,6 +133,21 @@ if (!admin.apps.length) {
 }
 
 // ============================================
+// FIREBASE WEB API KEY
+// ============================================
+// Firebase ke public identitytoolkit endpoints (sendOobCode) ke liye web apiKey
+// chahiye. Yeh secret NAHI hai (browser mein already public hota hai), lekin
+// env var se lena behtar hai taake key badalni ho to redeploy na karni pare.
+// ============================================
+const FIREBASE_WEB_API_KEY_FALLBACK = 'AIzaSyD4Cfni7D2Kk_t6qeZ4jcWesIabnSM15mk';
+
+function firebaseWebApiKey() {
+    return process.env.FIREBASE_API_KEY
+        || process.env.FIREBASE_WEB_API_KEY
+        || FIREBASE_WEB_API_KEY_FALLBACK;
+}
+
+// ============================================
 // BREVO EMAIL SENDER
 // ============================================
 const EMAIL_TIMEOUT_MS = 10000;
@@ -2440,7 +2455,7 @@ app.get('/api/expiry-warning', async (req, res) => {
 // ============================================
 // POST /api/send-reset-link
 // ============================================
-// "Forgot Password" ke liye reset LINK wali email.
+// "Forgot Password" ke liye reset email.
 //
 // ⚠️ YEH ROUTE JAAN-BOOJH KAR PUBLIC HAI (requireAuth NAHI lagta).
 // Wajah:
@@ -2450,21 +2465,32 @@ app.get('/api/expiry-warning', async (req, res) => {
 //   2) Jo user apna password bhool gaya hai woh LOGIN NAHI kar sakta, is liye
 //      uske paas Firebase ID token hi nahi hota. Token maangna hi galat tha.
 //
+// 🔑 RESET LINK KAHAN SE AATA HAI?
+//   Firebase ka account email template hi reset link bhejta hai (uske apne
+//   oobCode ke saath). Woh link server par nahi hota:
+//     • Client SDK ka sendPasswordResetEmail() link return nahi karta.
+//     • identitytoolkit accounts:sendOobCode REST API bhi ab oobLink nahi deti
+//       (sirf kind + email return karti hai). Is liye use karna fazool hai.
+//   Pehle is route par `resetLink` ZAROORI tha — isi wajah se client se khaali
+//   link aati thi aur server 400 return karta tha (resetLink missing).
+//   AB: resetLink OPTIONAL hai. Na ho to hum Firebase ke apne reset email
+//   template se email bhejte hain (subject + body).
+//
+// ⚠️ RESET EMAIL TABHI JAYEGI JAB VERCEL PAR YEH ENV VARS SET HON:
+//      FIREBASE_API_KEY   → Firebase web apiKey (console se)
+//                            (ya FIREBASE_WEB_API_KEY)
+//   Email jayegi tariqEMAIL@gmail.com se — kyunke woh email template server par
+//   bana rehta hai (abhi aapke paas FIREBASE_SERVICE_ACCOUNT set nahi hai).
+//
 // 🔒 ABUSE SE BACHAO:
 //   • rateLimit (IP ke hisaab se)
-//   • resetLink sirf https par aur sirf apni site ke /reset-password.html par
-//   • resetLink mein email wahi honi chahiye jo request mein aayi hai
+//   • resetLink diya ho to: sirf https, sirf apni site ke /reset-password.html,
+//     aur us mein email wahi ho jo request mein aayi hai
 //   • yahan koi Firestore read/write nahi hota
-//
-// NOTE: resetLink (jis mein Firebase ka oobCode hota hai) client par
-// sendPasswordResetEmail() se banta hai — Firebase ka admin SDK is project mein
-// init nahi hota (FIREBASE_SERVICE_ACCOUNT optional hai), is liye server
-// generatePasswordResetLink() use nahi kar sakta. Woh code Firestore mein
-// save NAHI hota aur sirf email ke through user tak jata hai.
 // ============================================
 app.post('/api/send-reset-link', rateLimit, async (req, res) => {
     try {
-        const { email, name, resetLink } = req.body || {};
+        const { email, name, resetLink, subject: subjectOverride, html: htmlOverride } = req.body || {};
         const cleanEmail = normalizeEmail(email);
 
         if (!isValidEmail(cleanEmail)) {
@@ -2472,42 +2498,107 @@ app.post('/api/send-reset-link', rateLimit, async (req, res) => {
         }
 
         const link = String(resetLink || '').trim();
-        if (!/^https:\/\//i.test(link)) {
-            return res.status(400).json({ success: false, error: 'A valid reset link is required' });
+
+        // ── Agar client ne link diya hai to validate karo ──────────
+        // (open-redirect / phishing se bachao). Na diya ho to koi masla nahi —
+        // neeche Firebase ke template se reset email bhej denge.
+        if (link) {
+            if (!/^https:\/\//i.test(link)) {
+                return res.status(400).json({ success: false, error: 'Reset link must start with https://' });
+            }
+
+            let linkUrl;
+            try { linkUrl = new URL(link); }
+            catch (_) { return res.status(400).json({ success: false, error: 'Reset link could not be parsed' }); }
+
+            if (!/\/reset-password(\.html)?$/i.test(linkUrl.pathname)) {
+                return res.status(400).json({ success: false, error: 'Reset link must point to the reset-password page' });
+            }
+
+            const linkEmail = normalizeEmail(linkUrl.searchParams.get('email') || '');
+            if (linkEmail && linkEmail !== cleanEmail) {
+                return res.status(400).json({ success: false, error: 'Reset link does not match the recipient email' });
+            }
         }
 
-        // Link apni hi site ke reset page ka hona chahiye (open-redirect / phishing se bachao)
-        let linkUrl;
-        try { linkUrl = new URL(link); }
-        catch (_) { return res.status(400).json({ success: false, error: 'Reset link could not be parsed' }); }
-
-        if (linkUrl.protocol !== 'https:') {
-            return res.status(400).json({ success: false, error: 'Reset link must use https' });
-        }
-        if (!/\/reset-password(\.html)?$/i.test(linkUrl.pathname)) {
-            return res.status(400).json({ success: false, error: 'Reset link must point to the reset-password page' });
-        }
-
-        // Link mein jo email hai wahi recipient hona chahiye
-        const linkEmail = normalizeEmail(linkUrl.searchParams.get('email') || '');
-        if (linkEmail && linkEmail !== cleanEmail) {
-            return res.status(400).json({ success: false, error: 'Reset link does not match the recipient email' });
+        // ── (A) Client ne branded template bhej diya — wohi use karo ──
+        if (htmlOverride && subjectOverride) {
+            const result = await sendEmail({
+                to: cleanEmail,
+                toName: name || '',
+                subject: String(subjectOverride),
+                html: String(htmlOverride)
+            });
+            if (!result.success) {
+                console.error(`[reset-link] email send failed for ${cleanEmail}: ${result.error}`);
+                return res.status(500).json({ success: false, error: 'Could not send the reset link. Please try again.' });
+            }
+            console.log(`[reset-link] reset email sent to ${cleanEmail} (client template)`);
+            return res.status(200).json({ success: true, message: 'Password reset email sent', to: cleanEmail });
         }
 
-        const { html, subject } = buildPasswordResetEmail({
-            name: name || cleanEmail,
-            resetLink: link,
-            expiresIn: '1 hour'
+        // ── (B) Link mojood hai — apni branded template se bhejo ────
+        if (link) {
+            const { html, subject } = buildPasswordResetEmail({
+                name: name || cleanEmail,
+                resetLink: link,
+                expiresIn: '1 hour'
+            });
+
+            const result = await sendEmail({ to: cleanEmail, toName: name || '', subject, html });
+            if (!result.success) {
+                console.error(`[reset-link] email send failed for ${cleanEmail}: ${result.error}`);
+                return res.status(500).json({ success: false, error: 'Could not send the reset link. Please try again.' });
+            }
+            console.log(`[reset-link] password reset link sent to ${cleanEmail}`);
+            return res.status(200).json({ success: true, message: 'Password reset link sent', to: cleanEmail });
+        }
+
+        // ── (C) Link nahi hai — Firebase ke apne reset-email template se bhejo ──
+        // Firebase email template hi asli reset link banata hai, is liye yeh
+        // sab se reliable raasta hai jab server ke paas oobCode na ho.
+        const fbApiKey = firebaseWebApiKey();
+        if (!fbApiKey) {
+            console.error('[reset-link] FIREBASE_API_KEY is not set — cannot generate the reset email');
+            return res.status(503).json({
+                success: false,
+                error: 'Password reset service is not configured. Please contact support.'
+            });
+        }
+
+        const fbRes = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?key=' + encodeURIComponent(fbApiKey), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                requestType: 'PASSWORD_RESET',
+                email: cleanEmail,
+                continueUrl: 'https://healthjobportal.com/reset-password.html'
+            })
         });
 
-        const result = await sendEmail({ to: cleanEmail, toName: name || '', subject, html });
-        if (!result.success) {
-            console.error(`[reset-link] email send failed for ${cleanEmail}: ${result.error}`);
-            return res.status(500).json({ success: false, error: 'Could not send the reset link. Please try again.' });
+        const fbData = await fbRes.json().catch(() => ({}));
+
+        if (!fbRes.ok) {
+            const fbCode = fbData?.error?.message || `HTTP ${fbRes.status}`;
+            console.error(`[reset-link] Firebase sendOobCode failed for ${cleanEmail}: ${fbCode}`);
+
+            // EMAIL_NOT_FOUND ka matlab account mojood nahi — user ko saaf batao.
+            if (String(fbCode).includes('EMAIL_NOT_FOUND')) {
+                return res.status(404).json({ success: false, error: 'No account found with this email address.' });
+            }
+            return res.status(502).json({
+                success: false,
+                error: 'Could not send the reset email right now. Please try again.'
+            });
         }
 
-        console.log(`[reset-link] password reset link sent to ${cleanEmail}`);
-        return res.status(200).json({ success: true, message: 'Password reset link sent', to: cleanEmail });
+        console.log(`[reset-link] Firebase reset email sent to ${cleanEmail}`);
+        return res.status(200).json({
+            success: true,
+            message: 'Password reset email sent',
+            to: cleanEmail,
+            via: 'firebase'
+        });
 
     } catch (err) {
         console.error('[reset-link] error:', err);
