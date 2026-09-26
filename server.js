@@ -929,6 +929,8 @@ const OTP_REQ_MAX       = 6;                // 30 min mein max 6 PIN emails
 
 // 🔒 LOCKOUT — bar bar fail hone par PIN verification band
 // Fail level ke hisaab se escalating cooldown.
+// NOTE: yeh `failCount` par chalta hai jo RESEND par reset NAHI hota —
+// is liye resend karne se user ka lock-level peeche nahi jata.
 const LOCK_LEVELS = [
     { fails: 3,  ms: 2 * 60 * 60 * 1000, label: '2 hours' },
     { fails: 6,  ms: 3 * 60 * 60 * 1000, label: '3 hours' },
@@ -941,6 +943,27 @@ function lockForFails(failCount) {
         if (failCount >= lvl.fails) chosen = lvl;
     }
     return chosen;
+}
+
+// 🔐 RESEND PAR ATTEMPT LIMIT PEEECHE NAHI JANI CHAHIYE
+//
+// PEHLE KYA GALAT THA:
+//   Har resend par `attempts` ko "0" se reset kar diya jata tha, aur
+//   `failCount` (jo 5 par PIN lock karta hai) bhi `OTP_MAX_ATTEMPTS` tak clamp
+//   ho jata tha. Farz karo user 4 bar ghalat PIN dale (1 attempt bacha hai),
+//   phir "Resend Code" dabaye — counter dobara 5 ho jata tha. User yeh khel
+//   bar bar karke ghair-mahdood tries le sakta tha (har 60s par 5 tries).
+//
+// AB KYA HOTA HAI:
+//   Resend par `attempts` wo hi value le kar chalta hai jo pehle thi (0 se
+//   reset NAHI hota), aur `failCount` bhi zinda rehta hai — is liye lock-level
+//   peeche nahi jata aur "X attempts remaining" sach bolta hai.
+//
+//   `failCount` ko lock ke BAAD (jab lock khul jaye) hi reset kiya jata hai
+//   (verify route mein) — taake user ko naya mauqa mile, lekin resend se nahi.
+
+function attemptsLeftFor(doc) {
+    return Math.max(0, OTP_MAX_ATTEMPTS - (doc?.attempts || 0));
 }
 
 function humanizeMs(ms) {
@@ -1380,23 +1403,36 @@ app.post('/api/send-otp', rateLimit, requireSignupSecret, async (req, res) => {
         }
 
         // Sirf hash store karo — plain code kabhi Firestore mein nahi jata
+        //
+        // ⚠️ `attempts` aur `failCount` RESEND par reset NAHI hote.
+        // Ye pehle reset ho kar 0 se shuru ho jate the, jis se user
+        // "Resend Code" daba kar apni tries dobara 5 kar leta tha —
+        // yani jitne attempts bachte the unse aage chala jata tha.
+        // Ab resend sirf NAYA code deta hai; counting wahin se chalti hai
+        // jahan chhod thi.
         await docRef.set({
             email:        cleanEmail,
             purpose:      cleanPurpose,
             codeHash:     hashOtp(code, cleanEmail),
             attempts:     prev?.attempts || 0,
             failCount:    prev?.failCount || 0,
+            lockedUntil:  null,       // lock nahi hai (upar check ho chuka)
             verified:     false,
             sentAtMs:     now,
             expiresAt:    now + OTP_TTL_MS,
+            resendCount:  (prev?.resendCount || 0) + 1,
             createdAt:    new Date().toISOString()
         });
 
-        console.log(`[otp] code sent to ${cleanEmail} (purpose=${cleanPurpose})`);
+        const remaining = attemptsLeftFor({ attempts: prev?.attempts || 0 });
+        console.log(`[otp] code sent to ${cleanEmail} (purpose=${cleanPurpose}, attemptsUsed=${prev?.attempts || 0}, left=${remaining})`);
         return res.status(200).json({
             success: true,
             message: 'Verification code sent to your email.',
-            expiresInSeconds: OTP_TTL_MS / 1000
+            expiresInSeconds: OTP_TTL_MS / 1000,
+            attemptsLeft: remaining,
+            attemptsUsed: prev?.attempts || 0,
+            maxAttempts: OTP_MAX_ATTEMPTS
         });
 
     } catch (err) {
@@ -1570,8 +1606,29 @@ app.post('/api/request-password-change', rateLimit, async (req, res) => {
         const docRef = db.collection(OTP_COLLECTION).doc(docId);
 
         const existing = await docRef.get();
-        if (existing.exists) {
-            const sinceLast = Date.now() - (existing.data().sentAtMs || 0);
+        const prev = existing.exists ? existing.data() : null;
+        const nowMs = Date.now();
+
+        if (prev) {
+            // 🔒 Lock ho chuka hai to resend se bhi nahi khulega
+            if (prev.lockedUntil && nowMs < prev.lockedUntil) {
+                const waitMs = prev.lockedUntil - nowMs;
+                return res.status(423).json({
+                    success: false,
+                    locked: true,
+                    error: `Too many failed attempts. Please try again in ${humanizeMs(waitMs)}.`,
+                    retryAfterSeconds: Math.ceil(waitMs / 1000)
+                });
+            }
+
+            // Lock ka waqt guzar gaya — tabhi counter reset karo
+            if (prev.lockedUntil && nowMs >= prev.lockedUntil) {
+                await docRef.update({ lockedUntil: null, failCount: 0, attempts: 0 });
+                prev.failCount = 0;
+                prev.attempts = 0;
+            }
+
+            const sinceLast = nowMs - (prev.sentAtMs || 0);
             if (sinceLast < OTP_RESEND_MS) {
                 const wait = Math.ceil((OTP_RESEND_MS - sinceLast) / 1000);
                 return res.status(429).json({
@@ -1590,7 +1647,7 @@ app.post('/api/request-password-change', rateLimit, async (req, res) => {
             purpose: 'password_change',
             heading: 'Confirm your password change',
             intro: 'We received a request to change your password. Enter the code below to confirm it is really you.',
-            note: 'This code expires in 10 minutes.'
+            note: 'This code expires in 2 minutes.'
         });
 
         const result = await sendEmail({ to: email, toName: name, subject, html });
@@ -1599,24 +1656,35 @@ app.post('/api/request-password-change', rateLimit, async (req, res) => {
             return res.status(500).json({ success: false, error: 'Could not send the code. Please try again.' });
         }
 
+        // ⚠️ `attempts`/`failCount` RESEND par reset NAHI hote.
+        // Pehle yahan `attempts: 0` likha tha — is se user "Resend Code" daba kar
+        // apni paanch tries dobara le leta tha aur lock ka koi faida nahi hota tha.
+        // Jo attempts bachte hain, wahi aage chaltay hain.
         await docRef.set({
             email,
             uid: decoded.uid,
             purpose: 'password_change',
             codeHash: hashOtp(code, email),
-            attempts: 0,
+            attempts:     prev?.attempts || 0,
+            failCount:    prev?.failCount || 0,
+            lockedUntil:  null,
             verified: false,
-            sentAtMs: Date.now(),
-            expiresAt: Date.now() + OTP_TTL_MS,
+            sentAtMs: nowMs,
+            expiresAt: nowMs + OTP_TTL_MS,
+            resendCount:  (prev?.resendCount || 0) + 1,
             createdAt: new Date().toISOString()
         });
 
-        console.log(`[pwd-change] code sent to ${email}`);
+        const remaining = attemptsLeftFor({ attempts: prev?.attempts || 0 });
+        console.log(`[pwd-change] code sent to ${email} (attemptsUsed=${prev?.attempts || 0}, left=${remaining})`);
         return res.status(200).json({
             success: true,
             message: 'Verification code sent to your email.',
             email,
-            expiresInSeconds: OTP_TTL_MS / 1000
+            expiresInSeconds: OTP_TTL_MS / 1000,
+            attemptsLeft: remaining,
+            attemptsUsed: prev?.attempts || 0,
+            maxAttempts: OTP_MAX_ATTEMPTS
         });
 
     } catch (err) {
@@ -1670,23 +1738,77 @@ app.post('/api/confirm-password-change', rateLimit, async (req, res) => {
         }
 
         const d = snap.data();
+        const nowMs = Date.now();
+        const failCount = d.failCount || 0;
+
+        // 🔒 LOCKOUT — pehle check karo ke locked to nahi
+        if (d.lockedUntil && nowMs < d.lockedUntil) {
+            const waitMs = d.lockedUntil - nowMs;
+            return res.status(423).json({
+                success: false,
+                locked: true,
+                error: `Too many failed attempts. Please try again in ${humanizeMs(waitMs)}.`,
+                retryAfterSeconds: Math.ceil(waitMs / 1000)
+            });
+        }
+
+        // Lock ka waqt guzar gaya — counter reset karo
+        if (d.lockedUntil && nowMs >= d.lockedUntil) {
+            await docRef.update({ lockedUntil: null, failCount: 0, attempts: 0 });
+            d.failCount = 0;
+            d.attempts = 0;
+        }
 
         if ((d.attempts || 0) >= OTP_MAX_ATTEMPTS) {
             return res.status(429).json({ success: false, error: 'Too many incorrect attempts. Please request a new code.' });
         }
-        if (Date.now() > (d.expiresAt || 0)) {
+        if (nowMs > (d.expiresAt || 0)) {
             return res.status(400).json({ success: false, error: 'This code has expired. Please request a new one.' });
         }
 
         if (hashOtp(cleanCode, email) !== d.codeHash) {
             const attempts = (d.attempts || 0) + 1;
-            await docRef.update({ attempts });
-            const left = Math.max(0, OTP_MAX_ATTEMPTS - attempts);
+            const newFailCount = failCount + 1;
+            const update = { attempts, failCount: newFailCount, lastFailAt: nowMs };
+
+            // 🔒 Lock bhi lage (pehle yeh route bina lock ke tha — 5 tries ke baad
+            // sirf "request a new code" keh kar resend se dobara 5 tries mil jati thin)
+            const lock = lockForFails(newFailCount);
+            if (lock) {
+                update.lockedUntil = nowMs + lock.ms;
+                console.warn(`[pwd-change] LOCKED ${email} for ${lock.label} after ${newFailCount} fails`);
+
+                try {
+                    const { html: lockHtml, subject: lockSubject } = buildPinLockedEmail({
+                        name: decoded.name || '',
+                        email,
+                        lockLabel: lock.label,
+                        failCount: newFailCount
+                    });
+                    await sendEmail({ to: email, subject: lockSubject, html: lockHtml });
+                } catch (mailErr) {
+                    console.error('[pwd-change] lock email failed:', mailErr.message);
+                }
+            }
+
+            await docRef.update(update);
+
+            if (lock) {
+                return res.status(423).json({
+                    success: false,
+                    locked: true,
+                    error: `Too many failed attempts. Please try again in ${lock.label}. A notification has been sent to your email.`,
+                    retryAfterSeconds: Math.ceil(lock.ms / 1000)
+                });
+            }
+
+            const left = attemptsLeftFor({ attempts });
             return res.status(400).json({
                 success: false,
                 error: left > 0
                     ? `Incorrect code. ${left} attempt${left === 1 ? '' : 's'} remaining.`
-                    : 'Too many incorrect attempts. Please request a new code.'
+                    : 'Too many incorrect attempts. Please request a new code.',
+                attemptsLeft: left
             });
         }
 
@@ -1694,7 +1816,14 @@ app.post('/api/confirm-password-change', rateLimit, async (req, res) => {
         await admin.auth().updateUser(decoded.uid, { password: String(newPassword) });
 
         // Code ko use-shuda mark karo (dobara istemal na ho)
-        await docRef.update({ verified: true, verifiedAt: Date.now(), usedForPasswordChange: true });
+        await docRef.update({
+            verified: true,
+            verifiedAt: nowMs,
+            usedForPasswordChange: true,
+            attempts: 0,
+            failCount: 0,
+            lockedUntil: null
+        });
 
         // ── Confirmation email ──────────────────────────────────
         try {
