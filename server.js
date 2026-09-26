@@ -1133,6 +1133,51 @@ function buildPasswordResetEmail({ name, resetLink, expiresIn }) {
 }
 
 // ============================================
+// ACCOUNT DEACTIVATED — confirmation email
+// ============================================
+// Deactivate hone ke baad user ko yeh jati hai. Isi email se user ko
+// pata chalta hai ke activation sirf support ke through mumkin hai.
+// ============================================
+function buildDeactivatedEmail({ name, email, when }) {
+    const rows = [
+        { label: 'Account',    value: email || 'Your account' },
+        { label: 'Deactivated At', value: when || new Date().toLocaleString('en-PK', { timeZone: 'Asia/Karachi', dateStyle: 'medium', timeStyle: 'short' }) },
+        { label: 'Status',     value: 'Deactivated' },
+    ];
+
+    const bodyContent = `
+      ${buildEyebrow('Account Deactivated', BRAND.warn)}
+      ${buildHeading('Your account has been deactivated')}
+
+      <p style="margin:0 0 22px;font-size:13.5px;color:${BRAND.body};line-height:1.75;">
+        Dear ${name || 'Health Jobs User'},<br>
+        Your Health Jobs Portal account has been deactivated as you requested.
+        Your profile and posts are no longer visible, and you will not receive any
+        job alerts or notifications.
+      </p>
+
+      ${buildNotice({
+        tone: 'warn',
+        text: `<strong style="color:#78350f;">Want your account back?</strong><br>Activation is only possible through our support team. Submit an activation request and we will review it.`
+      })}
+
+      <p style="margin:0 0 10px;font-size:11px;font-weight:700;letter-spacing:0.6px;text-transform:uppercase;color:${BRAND.muted};">Details</p>
+      ${buildDetailTable(rows, '26px')}
+
+      ${buildButton({ href: 'https://healthjobportal.com/activation.html', label: 'Request Account Activation' })}
+
+      <p style="margin:20px 0 0;font-size:12.5px;color:${BRAND.body};line-height:1.7;">
+        If you did not request this, please contact our support team immediately —
+        someone may have access to your account.
+      </p>`;
+
+    return {
+        html: buildShell({ title: 'Account Deactivated - Health Jobs Portal', bodyContent }),
+        subject: 'Your Health Jobs Portal account has been deactivated'
+    };
+}
+
+// ============================================
 // 🔐 INTERNAL SECRET GATE — signup PIN routes
 // ============================================
 // Signup ke PIN sirf aapki site (via nodemails / employee.html / candidate2.html)
@@ -1851,6 +1896,334 @@ app.post('/api/confirm-password-change', rateLimit, async (req, res) => {
 
     } catch (err) {
         console.error('[pwd-change] confirm error:', err);
+        return res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ============================================
+// POST /api/request-deactivation
+// ============================================
+// Settings page se "Deactivate Account" par 6-digit PIN bhejta hai.
+//
+// Password change jaisa hi halka token check (admin-gate NAHI) —
+// kyunke har normal user apna account band kar sakta hai.
+//
+// PIN kyun zaroori hai:
+//   Bina code ke koi bhi khula phone le kar aapka account deactivate
+//   kar deta. Code se confirm hota hai ke yeh asal owner hai.
+//
+// LOCK RULES wahi hain jo baaki PIN routes mein hain:
+//   • 5 ghalat tries par lock (2 ghante, phir 3, phir 5)
+//   • resend se attempts PEEECHE nahi jate
+// ============================================
+app.post('/api/request-deactivation', rateLimit, async (req, res) => {
+    try {
+        if (!db) {
+            return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
+        }
+
+        const authHeader = req.headers['authorization'] || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+        if (!token) {
+            return res.status(401).json({ success: false, error: 'Unauthorized: please sign in again' });
+        }
+
+        let decoded;
+        try {
+            decoded = await admin.auth().verifyIdToken(token);
+        } catch (e) {
+            return res.status(401).json({ success: false, error: 'Session expired. Please sign in again.' });
+        }
+
+        const email = normalizeEmail(decoded.email);
+        if (!isValidEmail(email)) {
+            return res.status(400).json({ success: false, error: 'Your account has no valid email address' });
+        }
+
+        // Pehle se deactivated? Dobara karne ki zaroorat nahi.
+        try {
+            const userRef = db.collection('users').doc(decoded.uid);
+            const userSnap = await userRef.get();
+            if (userSnap.exists && userSnap.data()?.isDeactivated === true) {
+                return res.status(200).json({
+                    success: true,
+                    alreadyDeactivated: true,
+                    message: 'This account is already deactivated.'
+                });
+            }
+        } catch (e) {
+            console.warn('[deactivate] user check failed:', e.message);
+        }
+
+        const docId = otpDocId(email, 'deactivation');
+        const docRef = db.collection(OTP_COLLECTION).doc(docId);
+
+        const existing = await docRef.get();
+        const prev = existing.exists ? existing.data() : null;
+        const nowMs = Date.now();
+
+        if (prev) {
+            // 🔒 Lock ho chuka hai to resend se bhi nahi khulega
+            if (prev.lockedUntil && nowMs < prev.lockedUntil) {
+                const waitMs = prev.lockedUntil - nowMs;
+                return res.status(423).json({
+                    success: false,
+                    locked: true,
+                    error: `Too many failed attempts. Please try again in ${humanizeMs(waitMs)}.`,
+                    retryAfterSeconds: Math.ceil(waitMs / 1000)
+                });
+            }
+
+            // Lock ka waqt guzar gaya — tabhi counter reset karo
+            if (prev.lockedUntil && nowMs >= prev.lockedUntil) {
+                await docRef.update({ lockedUntil: null, failCount: 0, attempts: 0 });
+                prev.failCount = 0;
+                prev.attempts = 0;
+            }
+
+            const sinceLast = nowMs - (prev.sentAtMs || 0);
+            if (sinceLast < OTP_RESEND_MS) {
+                const wait = Math.ceil((OTP_RESEND_MS - sinceLast) / 1000);
+                return res.status(429).json({
+                    success: false,
+                    error: `Please wait ${wait} seconds before requesting another code.`,
+                    retryAfterSeconds: wait
+                });
+            }
+        }
+
+        const name = decoded.name || '';
+        const code = generateOtp();
+        const { html, subject } = buildOtpEmail({
+            name,
+            code,
+            purpose: 'deactivation',
+            heading: 'Confirm account deactivation',
+            intro: 'We received a request to deactivate your Health Jobs Portal account. Enter the code below to confirm it is really you.',
+            note: 'This code expires in 2 minutes.'
+        });
+
+        const result = await sendEmail({ to: email, toName: name, subject, html });
+        if (!result.success) {
+            console.error(`[deactivate] email send failed for ${email}: ${result.error}`);
+            return res.status(500).json({ success: false, error: 'Could not send the code. Please try again.' });
+        }
+
+        // ⚠️ attempts/failCount resend par reset NAHI hote (wahi PIN bug fix)
+        await docRef.set({
+            email,
+            uid: decoded.uid,
+            purpose: 'deactivation',
+            codeHash: hashOtp(code, email),
+            attempts:     prev?.attempts || 0,
+            failCount:    prev?.failCount || 0,
+            lockedUntil:  null,
+            verified: false,
+            sentAtMs: nowMs,
+            expiresAt: nowMs + OTP_TTL_MS,
+            resendCount:  (prev?.resendCount || 0) + 1,
+            createdAt: new Date().toISOString()
+        });
+
+        const remaining = attemptsLeftFor({ attempts: prev?.attempts || 0 });
+        console.log(`[deactivate] code sent to ${email} (attemptsUsed=${prev?.attempts || 0}, left=${remaining})`);
+        return res.status(200).json({
+            success: true,
+            message: 'Verification code sent to your email.',
+            email,
+            expiresInSeconds: OTP_TTL_MS / 1000,
+            attemptsLeft: remaining,
+            attemptsUsed: prev?.attempts || 0,
+            maxAttempts: OTP_MAX_ATTEMPTS
+        });
+
+    } catch (err) {
+        console.error('[deactivate] request error:', err);
+        return res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// ============================================
+// POST /api/confirm-deactivation
+// ============================================
+// Code verify karta hai AUR account deactivate karta hai:
+//   • users/{uid}.isDeactivated = true   → like/comment/share band,
+//     search aur wid.html par nahi dikhta, job alerts band
+//   • activation_requests/{uid} = pending → admin panel ki request list
+//
+// Activation sirf admin panel se hoti hai.
+// ============================================
+app.post('/api/confirm-deactivation', rateLimit, async (req, res) => {
+    try {
+        if (!db) {
+            return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
+        }
+
+        const { code } = req.body;
+        const cleanCode = String(code || '').replace(/\D/g, '');
+
+        if (cleanCode.length !== 6) {
+            return res.status(400).json({ success: false, error: 'A valid 6-digit code is required' });
+        }
+
+        const authHeader = req.headers['authorization'] || '';
+        const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+        if (!token) {
+            return res.status(401).json({ success: false, error: 'Unauthorized: please sign in again' });
+        }
+
+        let decoded;
+        try {
+            decoded = await admin.auth().verifyIdToken(token);
+        } catch (e) {
+            return res.status(401).json({ success: false, error: 'Session expired. Please sign in again.' });
+        }
+
+        const email = normalizeEmail(decoded.email);
+        const docRef = db.collection(OTP_COLLECTION).doc(otpDocId(email, 'deactivation'));
+        const snap = await docRef.get();
+
+        if (!snap.exists) {
+            return res.status(400).json({ success: false, error: 'No verification code found. Please request a new one.' });
+        }
+
+        const d = snap.data();
+        const nowMs = Date.now();
+        const failCount = d.failCount || 0;
+
+        // 🔒 LOCKOUT
+        if (d.lockedUntil && nowMs < d.lockedUntil) {
+            const waitMs = d.lockedUntil - nowMs;
+            return res.status(423).json({
+                success: false,
+                locked: true,
+                error: `Too many failed attempts. Please try again in ${humanizeMs(waitMs)}.`,
+                retryAfterSeconds: Math.ceil(waitMs / 1000)
+            });
+        }
+
+        if (d.lockedUntil && nowMs >= d.lockedUntil) {
+            await docRef.update({ lockedUntil: null, failCount: 0, attempts: 0 });
+            d.failCount = 0;
+            d.attempts = 0;
+        }
+
+        if ((d.attempts || 0) >= OTP_MAX_ATTEMPTS) {
+            return res.status(429).json({ success: false, error: 'Too many incorrect attempts. Please request a new code.' });
+        }
+        if (nowMs > (d.expiresAt || 0)) {
+            return res.status(400).json({ success: false, error: 'This code has expired. Please request a new one.' });
+        }
+
+        // ── GALAT CODE ─────────────────────────────────────────
+        if (hashOtp(cleanCode, email) !== d.codeHash) {
+            const attempts = (d.attempts || 0) + 1;
+            const newFailCount = failCount + 1;
+            const update = { attempts, failCount: newFailCount, lastFailAt: nowMs };
+
+            const lock = lockForFails(newFailCount);
+            if (lock) {
+                update.lockedUntil = nowMs + lock.ms;
+                console.warn(`[deactivate] LOCKED ${email} for ${lock.label} after ${newFailCount} fails`);
+
+                try {
+                    const { html: lockHtml, subject: lockSubject } = buildPinLockedEmail({
+                        name: decoded.name || '',
+                        email,
+                        lockLabel: lock.label,
+                        failCount: newFailCount
+                    });
+                    await sendEmail({ to: email, subject: lockSubject, html: lockHtml });
+                } catch (mailErr) {
+                    console.error('[deactivate] lock email failed:', mailErr.message);
+                }
+            }
+
+            await docRef.update(update);
+
+            if (lock) {
+                return res.status(423).json({
+                    success: false,
+                    locked: true,
+                    error: `Too many failed attempts. Account deactivation is locked for ${lock.label}. A notification has been sent to your email.`,
+                    retryAfterSeconds: Math.ceil(lock.ms / 1000)
+                });
+            }
+
+            const left = attemptsLeftFor({ attempts });
+            return res.status(400).json({
+                success: false,
+                error: left > 0
+                    ? `Incorrect code. ${left} attempt${left === 1 ? '' : 's'} remaining.`
+                    : 'Too many incorrect attempts. Please request a new code.',
+                attemptsLeft: left
+            });
+        }
+
+        // ── SAHI CODE — ab account deactivate karo ──────────────
+        const uid = decoded.uid;
+        const nowIso = new Date().toISOString();
+
+        await db.collection('users').doc(uid).set({
+            isDeactivated: true,
+            deactivatedAt: nowIso,
+            activationRequest: { status: 'pending', requestedAt: nowIso }
+        }, { merge: true });
+
+        // Admin panel ke "Activations / Deactivations" page ke liye
+        // ek chhoti alag doc — taake list query aasan aur sasti rahe.
+        try {
+            const userSnap = await db.collection('users').doc(uid).get();
+            const u = userSnap.exists ? userSnap.data() : {};
+
+            await db.collection('activation_requests').doc(uid).set({
+                uid,
+                email,
+                name: u.facilityName || u.fullName || u.name || u.displayName || '',
+                role: u.role || '',
+                city: u.city || '',
+                phone: u.contactPhone || '',
+                status: 'pending',
+                requestedAt: nowIso,
+                requestedBy: 'user'
+            }, { merge: true });
+        } catch (reqErr) {
+            // Flag to lag chuka hai — request doc fail hone par bhi
+            // account deactivated hi rehna chahiye.
+            console.error('[deactivate] activation request doc failed:', reqErr.message);
+        }
+
+        await docRef.update({
+            verified: true,
+            verifiedAt: nowMs,
+            usedForDeactivation: true,
+            attempts: 0,
+            failCount: 0,
+            lockedUntil: null
+        });
+
+        // ── Confirmation email ────────────────────────────────
+        try {
+            const when = new Date().toLocaleString('en-PK', {
+                timeZone: 'Asia/Karachi', dateStyle: 'medium', timeStyle: 'short'
+            });
+            const { html, subject } = buildDeactivatedEmail({ name: decoded.name || email, email, when });
+            await sendEmail({ to: email, toName: decoded.name || '', subject, html });
+        } catch (mailErr) {
+            // Account already deactivate ho chuka hai — email fail par
+            // user ko error nahi dikhana chahiye.
+            console.error('[deactivate] confirmation email failed:', mailErr.message);
+        }
+
+        console.log(`[deactivate] account deactivated for ${email}`);
+        return res.status(200).json({
+            success: true,
+            message: 'Your account has been deactivated. Contact support to activate it again.',
+            activationUrl: 'https://healthjobportal.com/activation.html'
+        });
+
+    } catch (err) {
+        console.error('[deactivate] confirm error:', err);
         return res.status(500).json({ success: false, error: err.message });
     }
 });
@@ -2753,7 +3126,9 @@ app.get('/', (req, res) => {
             sendOtp:                'POST /api/send-otp',
             verifyOtp:              'POST /api/verify-otp',
             requestPasswordChange:  'POST /api/request-password-change',
-            confirmPasswordChange:  'POST /api/confirm-password-change'
+            confirmPasswordChange:  'POST /api/confirm-password-change',
+            requestDeactivation:    'POST /api/request-deactivation',
+            confirmDeactivation:    'POST /api/confirm-deactivation'
         },
         emailConfigured: isEmailConfigured(),
         adminEmail: ADMIN_EMAIL,
