@@ -2249,6 +2249,30 @@ async function isEmailAlertOptedIn(uid) {
     }
 }
 
+// Recipient ki email se opt-in check (job-alert ke liye).
+// req.user.uid CALLER ki hoti hai, receiver ki nahi — is liye email se dhoondte hain.
+async function isEmailAlertOptedInByEmail(email) {
+    if (!email || !db) return true;
+    try {
+        const raw = String(email).trim();
+        for (const candidate of [...new Set([raw, raw.toLowerCase()])]) {
+            const snap = await db.collection('users')
+                .where('email', '==', candidate)
+                .select('notificationPrefs')
+                .limit(1)
+                .get();
+            if (snap.empty) continue;
+            const prefs = snap.docs[0].data()?.notificationPrefs;
+            if (!prefs) return true;
+            return prefs.emailJobAlerts !== false && prefs.notifications !== false;
+        }
+        return true;
+    } catch (e) {
+        console.error('[prefs] opt-in check by email failed:', e.message);
+        return true;
+    }
+}
+
 // ============================================
 // ADMIN BROADCAST EMAIL TEMPLATE
 // ============================================
@@ -2476,10 +2500,7 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
 
             // Opt-in check — quota bachane ke liye Firestore read se pehle.
             // Caller ne khud user ka pref bhej diya ho to wohi use karo.
-            let allowed = req.body.emailJobAlerts;
-            if (typeof allowed !== 'boolean') {
-                allowed = await isEmailAlertOptedIn(req.user.uid);
-            }
+            const allowed = await isEmailAlertOptedInByEmail(email);
             if (!allowed) {
                 console.log(`[job-alert] skipped ${email} — user opted out of email job alerts`);
                 return res.status(200).json({ success: true, skipped: true, reason: 'opted_out' });
@@ -2890,6 +2911,7 @@ app.get('/api/expiry-warning', async (req, res) => {
             // Fetch poster info — check all possible name fields
             let posterEmail = null;
             let posterName = 'User';
+            let posterPrefs = null;
 
             const posterIdField = post.posterId || post.userId || post.uid || null;
             console.log(`Post ${postId}: posterIdField =`, posterIdField);
@@ -2901,6 +2923,7 @@ app.get('/api/expiry-warning', async (req, res) => {
                         const userData = userDoc.data();
                         posterEmail = userData.email || null;
                         posterName = userData.fullName || userData.facilityName || userData.name || userData.displayName || 'User';
+                        posterPrefs = userData.notificationPrefs || null;
                         console.log(`Post ${postId}: posterEmail = ${posterEmail}, posterName = ${posterName}`);
                     } else {
                         console.log(`Post ${postId}: user doc not found for id:`, posterIdField);
@@ -2917,6 +2940,12 @@ app.get('/api/expiry-warning', async (req, res) => {
 
             if (!posterEmail) {
                 console.log(`Post ${postId}: skipped — no email found`);
+                continue;
+            }
+
+            // 🔕 Poster ne email alerts OFF kiye hon to expiry email bhi nahi jayegi
+            if (posterPrefs && (posterPrefs.emailJobAlerts === false || posterPrefs.notifications === false)) {
+                console.log(`Post ${postId}: skipped — poster opted out of emails`);
                 continue;
             }
 
