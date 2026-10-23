@@ -69,28 +69,45 @@ async function requireAuth(req, res, next) {
     try {
         const decoded = await admin.auth().verifyIdToken(token);
 
-        // ── Admin-only gate ──────────────────────────────────────────
-        // Only the admin email(s) are allowed to call this API via token.
-        // Server-to-server calls (x-internal-secret) bypass this check above.
+        // ── Admin-only gate (sirf sensitive types ke liye) ────────
+        // Pehle YAHAN har non-admin request block ho jati thi — is wajah se
+        // jab employer/candidate job post karke /api/send-notification
+        // (type=new-post) call karte the to 403 "Forbidden: admin access
+        // only" aata aur matched users ko email kabhi nahi jati thi.
+        // AB: sirf sensitive types (approval/rejection/appeal/broadcast/
+        // password-reset) admin-gated hain. Normal user types (welcome,
+        // new-post, job-alert) sirf valid token se pass hote hain.
         const allowedAdmins = [
             'sufiangsufiang50@gmail.com',
             ...(process.env.ADMIN_EMAIL ? [process.env.ADMIN_EMAIL] : []),
             ...(process.env.ADMIN_EMAILS_EXTRA ? process.env.ADMIN_EMAILS_EXTRA.split(',').map(s => s.trim()) : []),
         ].filter(Boolean);
 
-        if (!allowedAdmins.includes(decoded.email)) {
-            console.warn('[auth] blocked non-admin attempt from:', decoded.email);
+        const requestType = String((req.body && req.body.type) || '').trim();
+        if (ADMIN_ONLY_NOTIFY_TYPES.has(requestType) && !allowedAdmins.includes(decoded.email)) {
+            console.warn('[auth] blocked non-admin attempt for type=' + requestType + ' from:', decoded.email);
             return res.status(403).json({ success: false, error: 'Forbidden: admin access only' });
         }
         // ────────────────────────────────────────────────────────────
 
         req.user = decoded;
+        req.isAdmin = allowedAdmins.includes(decoded.email);
         next();
     } catch (err) {
         console.warn('[auth] invalid token:', err.message);
         return res.status(401).json({ success: false, error: 'Unauthorized: invalid or expired token' });
     }
 }
+
+// Sensitive notification types — sirf admin inhe bhej sakta hai (approval/
+// rejection decisions, appeals, broadcast, password-reset links). Admin
+// panel yeh sab Internal Secret (x-internal-secret) ke zariye call karta
+// hai jo upar hi bypass ho chuka hai.
+const ADMIN_ONLY_NOTIFY_TYPES = new Set([
+    'employer-approved', 'employer-rejected', 'employer-rejected-final',
+    'appeal-approved', 'appeal-rejected', 'appeal-submitted',
+    'admin-broadcast', 'password-reset'
+]);
 
 // ============================================
 // ADMIN NOTIFICATION SETTINGS
@@ -247,8 +264,14 @@ async function sendAdminEmail({ subject, html, toName }) {
 // ============================================
 function formatSalary(salary) {
     if (!salary) return 'Negotiable';
-    const num = parseInt(String(salary).replace(/[^0-9]/g, ''));
-    if (isNaN(num)) return salary;
+    const raw = String(salary).trim();
+    // "Rs. 50,000 - Rs. 80,000" ya "50,000 - 80,000" range — dono parts
+    // numeric hain to puri range as-is dikhati hai (na ke sirf min).
+    if (/[\-–—]/.test(raw)) {
+        return raw;
+    }
+    const num = parseInt(raw.replace(/[^0-9]/g, ''));
+    if (isNaN(num)) return salary; // custom text (English/Urdu) waise hi pass hota hai
     return 'PKR ' + num.toLocaleString('en-PK');
 }
 
@@ -2249,30 +2272,6 @@ async function isEmailAlertOptedIn(uid) {
     }
 }
 
-// Recipient ki email se opt-in check (job-alert ke liye).
-// req.user.uid CALLER ki hoti hai, receiver ki nahi — is liye email se dhoondte hain.
-async function isEmailAlertOptedInByEmail(email) {
-    if (!email || !db) return true;
-    try {
-        const raw = String(email).trim();
-        for (const candidate of [...new Set([raw, raw.toLowerCase()])]) {
-            const snap = await db.collection('users')
-                .where('email', '==', candidate)
-                .select('notificationPrefs')
-                .limit(1)
-                .get();
-            if (snap.empty) continue;
-            const prefs = snap.docs[0].data()?.notificationPrefs;
-            if (!prefs) return true;
-            return prefs.emailJobAlerts !== false && prefs.notifications !== false;
-        }
-        return true;
-    } catch (e) {
-        console.error('[prefs] opt-in check by email failed:', e.message);
-        return true;
-    }
-}
-
 // ============================================
 // ADMIN BROADCAST EMAIL TEMPLATE
 // ============================================
@@ -2307,7 +2306,7 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
     try {
         const {
             type, email, name, postId, title, category, location, salary,
-            posterName, posterId, postType, link,
+            posterName, posterId, postType, link, experience,
             jobTitle, jobLocation, jobLink, matchScore
         } = req.body;
 
@@ -2500,7 +2499,10 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
 
             // Opt-in check — quota bachane ke liye Firestore read se pehle.
             // Caller ne khud user ka pref bhej diya ho to wohi use karo.
-            const allowed = await isEmailAlertOptedInByEmail(email);
+            let allowed = req.body.emailJobAlerts;
+            if (typeof allowed !== 'boolean') {
+                allowed = await isEmailAlertOptedIn(req.user.uid);
+            }
             if (!allowed) {
                 console.log(`[job-alert] skipped ${email} — user opted out of email job alerts`);
                 return res.status(200).json({ success: true, skipped: true, reason: 'opted_out' });
@@ -2699,11 +2701,21 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
                 if (!userLocMatches(userLocStr)) { skipped.location++; continue; }
 
                 const userName = user.facilityName || user.fullName || user.name || user.displayName || 'Health Jobs User';
+                // Salary: employer ne custom text (English/Urdu) likha ho to
+                // wahi jaye — numeric ho to Rs. format, range to range hi.
+                const salaryStr = String(salary || '').trim();
+                const salaryDisplay = (salaryStr && salaryStr !== 'Negotiable') ? formatSalary(salaryStr) : 'Negotiable';
                 const rows = [
                     { label: 'Category', value: rawCats.join(', ') || category },
                     { label: 'Location', value: rawLocs.join(', ') || 'Pakistan' },
-                    { label: 'Salary',   value: formatSalary(salary) }
+                    { label: 'Salary',   value: salaryDisplay }
                 ];
+                // Experience: post par jo likha gaya (dropdown ya manual
+                // text) wo email mein bhi jaye — English/Urdu dono.
+                const expStr = String(experience || '').trim();
+                if (expStr && expStr !== 'Any') {
+                    rows.push({ label: 'Experience', value: expStr });
+                }
 
                 const html = buildAlertEmail({
                     userName,
@@ -2911,7 +2923,6 @@ app.get('/api/expiry-warning', async (req, res) => {
             // Fetch poster info — check all possible name fields
             let posterEmail = null;
             let posterName = 'User';
-            let posterPrefs = null;
 
             const posterIdField = post.posterId || post.userId || post.uid || null;
             console.log(`Post ${postId}: posterIdField =`, posterIdField);
@@ -2923,7 +2934,6 @@ app.get('/api/expiry-warning', async (req, res) => {
                         const userData = userDoc.data();
                         posterEmail = userData.email || null;
                         posterName = userData.fullName || userData.facilityName || userData.name || userData.displayName || 'User';
-                        posterPrefs = userData.notificationPrefs || null;
                         console.log(`Post ${postId}: posterEmail = ${posterEmail}, posterName = ${posterName}`);
                     } else {
                         console.log(`Post ${postId}: user doc not found for id:`, posterIdField);
@@ -2940,12 +2950,6 @@ app.get('/api/expiry-warning', async (req, res) => {
 
             if (!posterEmail) {
                 console.log(`Post ${postId}: skipped — no email found`);
-                continue;
-            }
-
-            // 🔕 Poster ne email alerts OFF kiye hon to expiry email bhi nahi jayegi
-            if (posterPrefs && (posterPrefs.emailJobAlerts === false || posterPrefs.notifications === false)) {
-                console.log(`Post ${postId}: skipped — poster opted out of emails`);
                 continue;
             }
 
