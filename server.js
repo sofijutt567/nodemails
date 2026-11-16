@@ -61,9 +61,27 @@ async function requireAuth(req, res, next) {
 
     const authHeader = req.headers['authorization'] || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    const requestType = String((req.body && req.body.type) || '').trim();
+    const needsAdmin = ADMIN_ONLY_NOTIFY_TYPES.has(requestType);
 
-    if (!token) {
+    // Worker-to-worker (x-notify-secret) — Firebase token nahi hota. Sirf normal
+    // (non-admin) types allowed: welcome / new-post / job-alert.
+    if (notifySecretOk(req)) {
+        if (needsAdmin) {
+            return res.status(403).json({ success: false, error: 'Forbidden: admin access only' });
+        }
+        req.firebaseUser = { uid: 'notify-service', email: '', isService: true };
+        return next();
+    }
+
+    // Admin-only types ko token ke bina bilkul pass na karein:
+    // warna admin route par "no token" message aata tha (Admin Worker header na
+    // bheje to masla chhupta reh jata tha).
+    if (!token && !needsAdmin) {
         return res.status(401).json({ success: false, error: 'Unauthorized: no token provided' });
+    }
+    if (!token && needsAdmin) {
+        return res.status(401).json({ success: false, error: 'Unauthorized: admin token required' });
     }
 
     try {
@@ -83,14 +101,15 @@ async function requireAuth(req, res, next) {
             ...(process.env.ADMIN_EMAILS_EXTRA ? process.env.ADMIN_EMAILS_EXTRA.split(',').map(s => s.trim()) : []),
         ].filter(Boolean);
 
-        const requestType = String((req.body && req.body.type) || '').trim();
-        if (ADMIN_ONLY_NOTIFY_TYPES.has(requestType) && !allowedAdmins.includes(decoded.email)) {
+        if (needsAdmin && !allowedAdmins.includes(decoded.email)) {
             console.warn('[auth] blocked non-admin attempt for type=' + requestType + ' from:', decoded.email);
             return res.status(403).json({ success: false, error: 'Forbidden: admin access only' });
         }
         // ────────────────────────────────────────────────────────────
 
         req.user = decoded;
+        // D1 endpoints (job-alert keys / post read) isi verified identity se chalte hain
+        req.firebaseUser = { uid: decoded.uid || decoded.user_id || '', email: decoded.email || '' };
         req.isAdmin = allowedAdmins.includes(decoded.email);
         next();
     } catch (err) {
@@ -122,6 +141,15 @@ const ADMIN_EMAILS_EXTRA = (process.env.ADMIN_EMAILS_EXTRA || "sufiangsufiang50@
 // Admin panel is hosted on Cloudflare Pages at this URL.
 // Override via ADMIN_PANEL_URL env var if it ever moves.
 const ADMIN_PANEL_URL = process.env.ADMIN_PANEL_URL || "https://adminhealthjobs.pages.dev";
+
+// Notify ke clients (Cloudflare workers) jo /api/post, /api/job-alert, /api/post-close
+// server-to-server call karte hain — unhe Firebase ID token nahi hota, is liye woh
+// yeh shared secret bhejte hain:  header  x-notify-secret: <NOTIFY_SECRET>
+const NOTIFY_SHARED_SECRET = process.env.NOTIFY_SECRET || process.env.INTERNAL_SECRET || '';
+function notifySecretOk(req) {
+    const given = String(req.headers['x-notify-secret'] || req.headers['x-internal-secret'] || '');
+    return !!NOTIFY_SHARED_SECRET && given === NOTIFY_SHARED_SECRET;
+}
 
 // ============================================
 // FIREBASE ADMIN INIT
@@ -161,8 +189,12 @@ const FIREBASE_WEB_API_KEY_FALLBACK = 'AIzaSyD4Cfni7D2Kk_t6qeZ4jcWesIabnSM15mk';
 function firebaseWebApiKey() {
     return process.env.FIREBASE_API_KEY
         || process.env.FIREBASE_WEB_API_KEY
+        || FIREBASE_PROJECT_FALLBACK_KEY
         || FIREBASE_WEB_API_KEY_FALLBACK;
 }
+// FIREBASE_PROJECT_FALLBACK_KEY upar (D1 section mein) define hai — wahan se
+// pehle use hota tha; neeche dono fallback keys same project ki hain, is liye
+// purani FIREBASE_WEB_API_KEY_FALLBACK line hataayi nahi gayi (compat).
 
 // ============================================
 // BREVO EMAIL SENDER
@@ -551,6 +583,301 @@ function buildFooter() {
         <p style="font-size:10px;color:#cbd5e1;margin:0;">Powered by Sufian X</p>
       </div>
     </div>`;
+}
+
+// ============================================
+// D1 POSTS (jobs / candidate profiles / general updates)
+// ============================================
+// Site ka main worker (worker.js) har post D1 ki `posts` table mein likhta hai
+// (schema: id, slug, type, poster_id, data(JSON), created_at, synced, notified)
+// aur Firestore mein sirf roz shaam ki cron copy karti hai.
+//
+// Is liye job-alert / expiry-warning ka data ab pehle D1 se aata hai, taake
+// Firestore read quota aur cron ka intezar dono na karna pare.
+//
+// Zaroori env vars (Vercel par set karein):
+//   CLOUDFLARE_ACCOUNT_ID, D1_DATABASE_ID  → D1 REST API
+//   CLOUDFLARE_D1_TOKEN                    → Cloudflare API token
+//                                            (permission: D1:Edit, sirf usi account ka)
+//   D1_BINDING (optional, default "DB")    → worker mein D1 binding ka naam
+//
+// ⚠️ Tab tak yeh service D1 par NAHI jayegi jab tak JOB-WORKER (`healthjobportal.
+// sufiangsufiang50.workers.dev`) bhi D1 handle na kare. `worker.js` (jahan
+// /api/posts hone chahiye) par env set karein:
+//   NOTIFY_API_URL = https://nodemails.vercel.app
+//   NOTIFY_SECRET  = wohi secret jo nodemails ke INTERNAL_SECRET par set hai
+// (yani worker → nodemails: POST /api/send-notification { type: 'new-post', postId },
+//  header x-internal-secret). Tab tak HTML se /api/job-alert ki call internet par
+//  404 degi — privacy ke liye localhost par test kiya gaya hai.
+// In ke bagair (ya jaan-boojh kar D1_READ=0 /
+// D1_DISABLED=1 set karne par) sab kuch pehle jaisa Firestore se chalta rahega.
+// ============================================
+const D1_ACCOUNT_ID  = process.env.CLOUDFLARE_ACCOUNT_ID || process.env.CF_ACCOUNT_ID || '';
+const D1_DATABASE_ID = process.env.D1_DATABASE_ID || process.env.CLOUDFLARE_D1_DATABASE_ID || '';
+const D1_API_TOKEN   = process.env.CLOUDFLARE_D1_TOKEN || process.env.CLOUDFLARE_API_TOKEN || '';
+const D1_BINDING     = process.env.D1_BINDING || 'DB';
+// Notification service ka apna URL — /api/job-alert andar se /api/send-notification
+// ko call karta hai. Vercel par VERCEL_* vars se khud pata chal jata hai.
+const SELF_URL = (function () {
+    if (process.env.MAIL_SELF_URL) return String(process.env.MAIL_SELF_URL).replace(/\/+$/, '');
+    if (process.env.VERCEL_PROJECT_PRODUCTION_URL) return 'https://' + process.env.VERCEL_PROJECT_PRODUCTION_URL;
+    if (process.env.VERCEL_URL) return 'https://' + process.env.VERCEL_URL;
+    return 'https://nodemails.vercel.app';
+})();
+const D1_TIMEOUT_MS  = 8000;
+const USE_D1 = String(process.env.D1_READ || '').toLowerCase() !== 'false'
+    && String(process.env.D1_DISABLED || '') !== '1';
+
+function isD1Configured() {
+    return USE_D1 && !!(D1_ACCOUNT_ID && D1_DATABASE_ID && D1_API_TOKEN);
+}
+
+// ============================================
+// FIREBASE ID TOKEN (D1 sirf login-shuda user se)
+// ============================================
+// D1 posts endpoint public nahi hona chahiye (warna koi bhi poori users/jobs
+// list kheenچ le). Is liye Firebase ID token ki asli tasdeeq — signature (JWKS) +
+// aud + iss + exp — sirf us ke baad uid/email par bharosa.
+//
+// Agar ek hi request par Firebase Admin SDK pehle hi verify kar chuka hai
+// (send-notification ka requireAuth) to whoami plain object hota hai aur wohi
+// use ho jata hai (double verification nahi).
+// ============================================
+const FIREBASE_JWKS_URL = 'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com';
+const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'jobs-45cc9';
+// Same public web apiKey jo site ke HTML mein already mojood hai (secret nahi)
+const FIREBASE_PROJECT_FALLBACK_KEY = 'AIzaSyD4Cfni7D2Kk_t6qeZ4jcWesIabnSM15mk';
+const jwksCache = { keys: null, exp: 0 };
+
+function b64urlToBytes(str) {
+    str = String(str).replace(/-/g, '+').replace(/_/g, '/');
+    while (str.length % 4) str += '=';
+    const bin = Buffer.from(str, 'base64');
+    return new Uint8Array(bin);
+}
+function b64urlToJson(str) {
+    return JSON.parse(Buffer.from(b64urlToBytes(str)).toString('utf8'));
+}
+// Dev/test: JWKS ko fake karne ke liye (production mein set nahi hota)
+async function getFirebaseJwks() {
+    if (typeof globalThis.__hjpVerifyTestToken === 'function') return [];
+    const now = Date.now();
+    if (jwksCache.keys && jwksCache.exp > now) return jwksCache.keys;
+    const res = await fetch(FIREBASE_JWKS_URL);
+    if (!res.ok) throw new Error('jwks fetch ' + res.status);
+    const j = await res.json();
+    jwksCache.keys = j.keys || [];
+    jwksCache.exp = now + 60 * 60 * 1000;
+    return jwksCache.keys;
+}
+async function requireFirebaseUser(req) {
+    // Firebase token mobile/proxy se Authorization ya x-firebase-token header mein aa sakta hai
+    const h = req.headers['authorization'] || (req.headers['x-firebase-token'] ? 'Bearer ' + req.headers['x-firebase-token'] : '');
+    const token = h.startsWith('Bearer ') ? h.slice(7) : '';
+    if (!token) return null;
+    if (req.firebaseUser && req.firebaseUser.uid) return req.firebaseUser; // already verified by requireAuth
+    // 1) Asli raasta: Firebase Admin SDK (public keys, revoke support)
+    try {
+        if (admin.apps.length) return await admin.auth().verifyIdToken(token);
+    } catch (e) {
+        console.warn('[auth] verifyIdToken failed:', e.message);
+        return null;
+    }
+    // 2) Fallback (Firebase init na ho): khud JWKS se signature verify
+    if (typeof globalThis.__hjpVerifyTestToken === 'function') return globalThis.__hjpVerifyTestToken(token);
+    const parts = String(token).split('.');
+    if (parts.length !== 3) return null;
+    let header, payload;
+    try {
+        header = b64urlToJson(parts[0]);
+        payload = b64urlToJson(parts[1]);
+    } catch (e) { return null; }
+    const now = Math.floor(Date.now() / 1000);
+    if (header.alg !== 'RS256' || !header.kid) return null;
+    if (payload.aud !== FIREBASE_PROJECT_ID) return null;
+    if (payload.iss !== 'https://securetoken.google.com/' + FIREBASE_PROJECT_ID) return null;
+    if (!payload.sub || payload.exp <= now) return null;
+    try {
+        let keys = await getFirebaseJwks();
+        let jwk = keys.find(k => k.kid === header.kid);
+        if (!jwk) { jwksCache.exp = 0; keys = await getFirebaseJwks(); jwk = keys.find(k => k.kid === header.kid); }
+        if (!jwk) return null;
+        const subtle = (globalThis.crypto && globalThis.crypto.subtle) || require('crypto').webcrypto.subtle;
+        const key = await subtle.importKey(
+            'jwk', { kty: jwk.kty, n: jwk.n, e: jwk.e, alg: 'RS256', ext: true },
+            { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']
+        );
+        const ok = await subtle.verify(
+            'RSASSA-PKCS1-v1_5', key, b64urlToBytes(parts[2]),
+            new TextEncoder().encode(parts[0] + '.' + parts[1])
+        );
+        if (!ok) return null;
+    } catch (e) {
+        console.error('[auth] token verify failed:', e.message);
+        return null;
+    }
+    return { uid: payload.sub, email: payload.email || '' };
+}
+
+// D1 par ek SQL query (parameterised — ?1, ?2 ...).
+// Error / timeout par throw — caller Firestore par fallback karta hai.
+async function d1Query(sql, params) {
+    if (!isD1Configured()) throw new Error('D1 not configured');
+    const url = 'https://api.cloudflare.com/client/v4/accounts/' + encodeURIComponent(D1_ACCOUNT_ID)
+        + '/d1/database/' + encodeURIComponent(D1_DATABASE_ID) + '/query';
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), D1_TIMEOUT_MS);
+    try {
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer ' + D1_API_TOKEN,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ sql, params: params || [] }),
+            signal: controller.signal
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.success) {
+            const e = (data.errors && data.errors[0] && data.errors[0].message) || ('HTTP ' + res.status);
+            throw new Error(e);
+        }
+        const first = (data.result && data.result[0]) || {};
+        if (first.success === false) throw new Error(first.error || 'D1 query failed');
+        return first.results || [];
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// D1 row → post doc (Firestore wala hi shape).
+function d1RowToPost(row, withInternals) {
+    if (!row || typeof row.data !== 'string') return null;
+    let d;
+    try { d = JSON.parse(row.data) || {}; } catch (e) { return null; }
+    if (!d || typeof d !== 'object') return null;
+    d.slug = d.slug || row.slug;
+    d.type = d.type || row.type;
+    d.posterId = d.posterId || row.poster_id;
+    if (!d.postedDateISO) d.postedDateISO = new Date(Number(row.created_at) || 0).toISOString();
+    if (withInternals) {
+        d._docId = row.id;
+        d._synced = Number(row.synced) === 1;
+        d._notified = Number(row.notified) === 1;
+        d._editedKeys = String(row.edited_keys || '');
+    }
+    return d;
+}
+
+// Getter bana rahe hain taake site worker (worker.js) ke `posts` schema se
+// column naam badalne par sirf yahan change karna pare.
+const D1_POST_COLUMNS = 'id, slug, type, poster_id, data, created_at, synced, notified, COALESCE(edited_keys, \'\') AS edited_keys';
+
+async function d1PostBySlug(slug) {
+    const rows = await d1Query(
+        'SELECT ' + D1_POST_COLUMNS + ' FROM posts WHERE slug = ?1 OR id = ?1 LIMIT 1', [slug]
+    );
+    return rows.length ? d1RowToPost(rows[0], true) : null;
+}
+
+// ── Alerts ki D1 tables ──────────────────────────────────────────────
+// D1 binding sirf site worker (worker.js) ke paas hai, is liye yeh tables
+// worker ke schema.sql mein nahi hain — service khud pehli dafa par bana leti
+// hai (CREATE TABLE IF NOT EXISTS), jaisa worker bhi fs_docs ke liye karta hai.
+const __d1Ready = { post_emails: false, expiry_alerts: false };
+const D1_ALERT_TABLES = {
+    post_emails:
+        'CREATE TABLE IF NOT EXISTS post_emails (' +
+        'post_id TEXT NOT NULL, ' +
+        'user_id TEXT NOT NULL, ' +
+        'sent_at TEXT NOT NULL, ' +
+        'PRIMARY KEY (post_id, user_id))',
+    expiry_alerts:
+        'CREATE TABLE IF NOT EXISTS expiry_alerts (' +
+        'post_id TEXT PRIMARY KEY, ' +
+        'sent_at INTEGER NOT NULL, ' +
+        'email TEXT NOT NULL DEFAULT \'\')'
+};
+async function ensureD1Table(name) {
+    if (__d1Ready[name]) return;
+    const ddl = D1_ALERT_TABLES[name];
+    if (!ddl) throw new Error('unknown table ' + name);
+    await d1Query(ddl);
+    __d1Ready[name] = true;
+}
+
+// NOTE: yeh service posts D1 mein NAHI likhti — ek hi writer (site worker ka
+// /api/posts) hai. Yahan sirf padhna (read) aur "alerts ho gaye" mark karna hai.
+async function d1PatchPost(id, set) {
+    const rows = await d1Query('SELECT ' + D1_POST_COLUMNS + ' FROM posts WHERE id = ?1 LIMIT 1', [id]);
+    if (!rows.length) return null;
+    const post = d1RowToPost(rows[0], true) || {};
+    for (const k of Object.keys(set || {})) {
+        if (k === 'expiryEmailSent' || k === 'expiryWarnedAt') continue; // internals D1 document mein na jayen
+        post[k] = set[k];
+    }
+    await d1Query(
+        'UPDATE posts SET data = ?1 WHERE id = ?2', [JSON.stringify(post), String(id)]
+    );
+    return true;
+}
+
+async function d1ExpiringPosts(nowIso, in24hIso, limit) {
+    const rows = await d1Query(
+        'SELECT ' + D1_POST_COLUMNS + ' FROM posts ' +
+        'WHERE json_extract(data, \'$.expiresAt\') > ?1 ' +
+        'AND json_extract(data, \'$.expiresAt\') <= ?2 ' +
+        'ORDER BY json_extract(data, \'$.expiresAt\') ASC LIMIT ?3',
+        [nowIso, in24hIso, limit]
+    );
+    return rows.map(r => { const d = d1RowToPost(r, true); return d ? { id: r.id, post: d } : null; }).filter(Boolean);
+}
+
+// User ka email/naam: D1 posts (poster_id) se ek query mein —
+// ek post ke 1500+ users ka naam/tasveer nikalne ke liye 1500 Firestore reads ki
+// zaroorat nahi rehti. (Email post doc mein nahi hoti, woh Firestore users ya
+// Firebase Auth se aati hai — dekhein firebaseAuthEmail.)
+async function d1UsersByUid(uids) {
+    const list = Array.from(new Set((uids || []).filter(Boolean))).slice(0, 200);
+    if (!list.length) return {};
+    const marks = list.map((_, i) => '?' + (i + 1)).join(', ');
+    const rows = await d1Query(
+        'SELECT poster_id,' +
+        ' json_extract(data, \'$.posterName\') AS nm,' +
+        ' json_extract(data, \'$.posterPic\') AS pic,' +
+        ' json_extract(data, \'$.posterRole\') AS role,' +
+        ' MAX(created_at) AS at FROM posts WHERE poster_id IN (' + marks + ') GROUP BY poster_id',
+        list
+    );
+    const out = {};
+    for (const r of rows) {
+        if (!r || !r.poster_id) continue;
+        out[r.poster_id] = { name: String(r.nm || '').slice(0, 150), pic: String(r.pic || ''), role: String(r.role || '') };
+    }
+    return out;
+}
+
+// D1 user ka account email = users collection se (jab service account ho).
+// Backup: Google Identity Toolkit `accounts:lookup` (web apiKey) — email verified
+// address deta hai, aur us ke liye Firestore/service-account ki zaroorat nahi.
+async function firebaseAuthEmail(uid) {
+    if (!uid) return '';
+    try {
+        const key = firebaseWebApiKey();
+        if (!key) return '';
+        const res = await fetch('https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=' + encodeURIComponent(key), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ localId: [uid] })
+        });
+        if (!res.ok) return '';
+        const j = await res.json().catch(() => ({}));
+        const u = (j.users && j.users[0]) || null;
+        return (u && u.email) ? String(u.email) : '';
+    } catch (e) {
+        console.error('[firebase] auth email lookup failed for', uid, ':', e.message);
+        return '';
+    }
 }
 
 // ============================================
@@ -2258,7 +2585,11 @@ app.post('/api/confirm-deactivation', rateLimit, async (req, res) => {
 // Default = ON (jab tak user ne khud band na kiya ho).
 // Sirf ek Firestore read — quota friendly.
 // ============================================
-async function isEmailAlertOptedIn(uid) {
+// `fallbackPrefs`: agar caller ke paas user ka notificationPrefs object pehle se
+// hai (e.g. D1 se aayi users copy), to Firestore read hi na karo.
+async function isEmailAlertOptedIn(uid, fallbackPrefs) {
+    const prefsOf = (p) => !p || (p.emailJobAlerts !== false && p.notifications !== false);
+    if (fallbackPrefs && typeof fallbackPrefs === 'object') return prefsOf(fallbackPrefs);
     if (!uid || !db) return true;            // pata nahi to bhej do (default ON)
     try {
         const snap = await db.collection('users').doc(uid).get();
@@ -2501,7 +2832,9 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
             // Caller ne khud user ka pref bhej diya ho to wohi use karo.
             let allowed = req.body.emailJobAlerts;
             if (typeof allowed !== 'boolean') {
-                allowed = await isEmailAlertOptedIn(req.user.uid);
+                // uid client se aata hai — opt-in check usi user ka hoga, na ke
+                // caller (admin panel) ka.
+                allowed = await isEmailAlertOptedIn(String(req.body.uid || '').slice(0, 128));
             }
             if (!allowed) {
                 console.log(`[job-alert] skipped ${email} — user opted out of email job alerts`);
@@ -2535,41 +2868,110 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
 
         // TYPE 3: NEW POST ALERT (Matched Users)
         if (type === 'new-post') {
-            if (!postId || !category) {
-                return res.status(400).json({ success: false, message: 'postId and category required.' });
+            if (!postId) {
+                return res.status(400).json({ success: false, message: 'postId is required.' });
             }
-            // This branch reads Firestore — fail loudly and clearly if the
-            // database is not configured, instead of a cryptic TypeError.
-            if (!db) {
-                console.error('[new-post] Firestore not initialized — check FIREBASE_SERVICE_ACCOUNT');
-                return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
-            }
-
-            const postUrl = link || `https://healthjobportal.com/post-detail.html?id=${postId}`;
-            const isEmployerPost = postType === 'employer_post';
-
-            console.log('Processing:', { postId, title, category, location, postType });
-
-            // ── Poster info ──────────────────────────────────
-            let realPosterName = posterName || 'Health Jobs User';
-            if (posterId) {
+            // ── 1) POST DOC: pehle D1, phir Firestore ─────────────────
+            // Post ka data (title/category/location/expiry...) site worker ne D1
+            // ki `posts` table mein likha hota hai. Is liye ab Firestore ki
+            // zaroorat nahi — category/location/postType/postId bhi D1 se aate hain.
+            // Firestore na initialized ho aur D1 bhi na ho to hi error.
+            let d1Post = null;
+            if (isD1Configured()) {
                 try {
-                    const posterDoc = await db.collection('users').doc(posterId).get();
-                    if (posterDoc.exists) {
-                        const d = posterDoc.data();
-                        realPosterName = d.fullName || d.facilityName || d.name || d.displayName || posterName || 'Health Jobs User';
-                    }
-                } catch (e) { console.error('Poster fetch error:', e.message); }
+                    d1Post = await d1PostBySlug(postId);
+                } catch (e) {
+                    console.error('[new-post] D1 post read failed, Firestore par ja rahe hain:', e.message);
+                    d1Post = null;
+                }
+            }
+            if (!d1Post && db) {
+                try {
+                    const snap = await db.collection('posts').doc(postId).get();
+                    if (snap.exists) d1Post = snap.data() || null; // same shape — D1 fallback hi hai
+                } catch (e) { console.error('[new-post] Firestore post read failed:', e.message); }
+            }
+            if (!d1Post && !db) {
+                console.error('[new-post] neither D1 nor Firestore available (check CLOUDFLARE_*/FIREBASE_SERVICE_ACCOUNT)');
+                return res.status(503).json({ success: false, error: 'Database not available (D1/Firebase not configured)' });
             }
 
-            // ── Already-sent log ─────────────────────────────
-            // 📉 QUOTA: sirf `userId` field fetch karo, poori doc nahi.
-            // Masked query = har doc se 1 field = bara read saving.
-            const logsSnap = await db.collection('email_logs')
-                .where('postId', '==', postId)
-                .select('userId')
-                .get();
-            const alreadySentUsers = new Set(logsSnap.docs.map(d => d.data().userId));
+            const postDoc = d1Post || {};
+            // D1/DB wali values pehle — asal post wahi hai jo site par live hai.
+            // Client ke bheje values sirf tab use hote hain jab post DB mein na mile
+            // (purane clients / post-detail page).
+            const category = postDoc.category || req.body.category || '';
+            const title = postDoc.title || req.body.title || postDoc.slug || '';
+            const location = postDoc.location || postDoc.city || req.body.location || '';
+            const salary = postDoc.salary || postDoc.salaryCustom || req.body.salary || '';
+            const experience = postDoc.experience || postDoc.experienceCustom || req.body.experience || '';
+            const posterId = postDoc.posterId || req.body.posterId || '';
+            const postType = postDoc.type || postType || '';
+            const isEmployerPost = postType === 'employer_post';
+            const internalId = postDoc._docId || postId;
+
+            if (!category) {
+                return res.status(400).json({ success: false, message: 'category required (post D1 mein nahi mili aur body mein bhi nahi aayi).' });
+            }
+
+            // Link: canonical (jobs/<slug>) — pehle post-detail.html banaya jata
+            // tha jo D1-first posts ke liye alag page hai.
+            const canonical = postDoc.canonicalUrl
+                || (postDoc.slug ? `https://healthjobportal.com/${postType === 'general_post' ? 'updates' : 'jobs'}/${postDoc.slug}` : '');
+            const postUrl = link || canonical || `https://healthjobportal.com/post-detail.html?id=${postId}`;
+
+            console.log('Processing:', { postId: internalId, slug: postDoc.slug || postId, title, category, postType });
+
+            // ── 2) Poster info ────────────────────────────────
+            // Doc ke posterName se, warna D1 posts se (ek query), warna users doc se.
+            let realPosterName = postDoc.posterName || req.body.posterName || "";
+            if (posterId && !realPosterName) {
+                if (isD1Configured()) {
+                    try {
+                        const m = await d1UsersByUid([posterId]);
+                        if (m[posterId] && m[posterId].name) realPosterName = m[posterId].name;
+                    } catch (e) { console.error('[new-post] D1 poster lookup failed:', e.message); }
+                }
+                if (!realPosterName && db) {
+                    try {
+                        const posterDoc = await db.collection('users').doc(posterId).get();
+                        if (posterDoc.exists) {
+                            const d = posterDoc.data();
+                            realPosterName = d.fullName || d.facilityName || d.name || d.displayName || '';
+                        }
+                    } catch (e) { console.error('Poster fetch error:', e.message); }
+                }
+            }
+            realPosterName = realPosterName || 'Health Jobs User';
+
+            // ── 3) Already-sent log (D1) ──────────────────
+            // email_logs ki jagah D1 `post_emails` (ek hi post/user ek dafa).
+            // Agar D1 nahi hai to Firestore email_logs par purana tareeqa.
+            const alreadySentUsers = new Set();
+            // Log ki jagah: D1 hai to `post_emails` table, warna Firestore email_logs.
+            // (Yeh isD1Configured se pehle set hota hai taake neeche loop mein use ho.)
+            const logBatch = (!isD1Configured() && db && typeof db.batch === 'function') ? db.batch() : null;
+            let logRows = [];
+            let batchCount = 0;
+            if (isD1Configured()) {
+                try {
+                    await ensureD1Table('post_emails');
+                    const rows = await d1Query(
+                        'SELECT user_id FROM post_emails WHERE post_id = ?1', [String(postId)]
+                    );
+                    rows.forEach(r => r && r.user_id && alreadySentUsers.add(String(r.user_id)));
+                } catch (e) {
+                    console.error('[new-post] D1 already-sent lookup failed (table missing?):', e.message);
+                }
+            }
+            if (!isD1Configured() && db) {
+                // 📉 QUOTA: sirf `userId` field fetch karo, poori doc nahi.
+                const logsSnap = await db.collection('email_logs')
+                    .where('postId', '==', postId)
+                    .select('userId')
+                    .get();
+                logsSnap.docs.forEach(d => alreadySentUsers.add(d.data().userId));
+            }
 
             // ── Parse post categories (array or comma-string) ─
             // Supports: "nurse", ["nurse","doctor"], "nurse,doctor"
@@ -2603,18 +3005,62 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
             //  3) accountStatus filter query se hata diya (missing field wale
             //     users ko silent-exclude kar deta tha). Approval neeche decide hoti hai.
             const targetRole = isEmployerPost ? 'candidate' : 'employer';
-            const usersSnap = await db.collection('users')
-                .where('role', '==', targetRole)
-                .select(
-                    'email', 'fullName', 'facilityName', 'name', 'displayName',
-                    'category', 'profession', 'qualification',
-                    'city', 'location', 'accountStatus', 'isDeactivated',
-                    'notificationPrefs'
-                )
-                .limit(1500)
-                .get();
+            let userDocs = [];
+            if (db) {
+                let usersSnap;
+                try {
+                    usersSnap = await db.collection('users')
+                    .where('role', '==', targetRole)
+                    .select(
+                        'email', 'fullName', 'facilityName', 'name', 'displayName',
+                        'category', 'profession', 'qualification',
+                        'city', 'location', 'accountStatus', 'isDeactivated',
+                        'notificationPrefs'
+                    )
+                    .limit(1500)
+                    .get();
+                } catch (e) {
+                    // Composite index na ho / Firestore error: masked query dobara (bina index bhi chal jati hai)
+                    console.error('[new-post] users query failed (' + (e.code || '') + '):', e.message);
+                    usersSnap = await db.collection('users')
+                        .where('role', '==', targetRole)
+                        .where('role', '==', targetRole)
+                        .limit(1500)
+                        .get();
+                }
+                userDocs = usersSnap.docs.map(d => ({ id: d.id, data: d.data() || {} }));
+            } else if (isD1Configured()) {
+                // Firestore service account nahi hai: D1 mein site worker ki save ki
+                // hui users copies (`fs_docs` → user:<uid>) se kaam chalao.
+                try {
+                    await d1Query(
+                        'CREATE TABLE IF NOT EXISTS fs_docs (k TEXT PRIMARY KEY, data TEXT NOT NULL, ts INTEGER NOT NULL)'
+                    );
+                    const rows = await d1Query(
+                        'SELECT data FROM fs_docs WHERE k LIKE \'user:%\' LIMIT 2000'
+                    );
+                    for (const r of rows) {
+                        try {
+                            const u = JSON.parse(r.data || '{}');
+                            if (String(u.role || '').toLowerCase() !== targetRole) continue;
+                            const uid = String(u.uid || (r.k || '').replace(/^user:/, ''));
+                            if (!uid) continue;
+                            userDocs.push({
+                                id: uid,
+                                data: {
+                                    role: u.role, accountStatus: u.status, isDeactivated: u.deact === true,
+                                    fullName: u.name, facilityName: u.name, category: u.category, city: u.city
+                                }
+                            });
+                        } catch (e) {}
+                    }
+                    console.log(`[new-post] D1 fs_docs se ${userDocs.length} users (role=${targetRole})`);
+                } catch (e) {
+                    console.error('[new-post] D1 users fallback failed:', e.message);
+                }
+            }
 
-            if (usersSnap.empty) {
+            if (!userDocs.length) {
                 console.log(`[new-post] no users with role=${targetRole}; nothing to notify`);
                 return res.json({ success: true, message: 'No matching users found.', sent: 0 });
             }
@@ -2672,16 +3118,47 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
             }
 
             let sent = 0;
-            const logBatch = db.batch();
-            let batchCount = 0;
+
             // Counters so a "0 sent" response is explainable from the logs alone.
             const skipped = { noEmail: 0, isPoster: 0, alreadySent: 0, notEligible: 0, optedOut: 0, category: 0, location: 0, sendFailed: 0 };
             let flushErrorCount = 0;
 
-            console.log(`[new-post] candidates: role=${targetRole}, fetched=${usersSnap.size}, alreadySent=${alreadySentUsers.size}`);
+            async function flushLogs(force) {
+                // D1: bulk insert (same user/post par dobara insert ignore)
+                if (logRows.length && isD1Configured()) {
+                    const slice = logRows.splice(0, logRows.length);
+                    try {
+                        const vals = [];
+                        const params = [];
+                        slice.forEach(r => {
+                            const b = params.length;
+                            vals.push(`(?${b + 1}, ?${b + 2}, ?${b + 3})`);
+                            params.push(r.post_id, r.user_id, r.sent_at);
+                        });
+                        await ensureD1Table('post_emails');
+                        await d1Query(
+                            'INSERT OR IGNORE INTO post_emails (post_id, user_id, sent_at) VALUES ' + vals.join(', '),
+                            params
+                        );
+                    } catch (e) {
+                        flushErrorCount++;
+                        console.error('[new-post] D1 log write failed (table missing?):', e.message);
+                    }
+                }
+                // Firestore (sirf jab D1 configured na ho)
+                if (!isD1Configured() && logBatch && (force || batchCount >= 400)) {
+                    try { await logBatch.commit(); } catch (e) {
+                        flushErrorCount++;
+                        console.error('Log batch flush error:', e.message);
+                    }
+                    batchCount = 0;
+                }
+            }
 
-            for (const userDoc of usersSnap.docs) {
-                const user = userDoc.data();
+            console.log(`[new-post] candidates: role=${targetRole}, fetched=${userDocs.length}, alreadySent=${alreadySentUsers.size}`);
+
+            for (const userDoc of userDocs) {
+                const user = userDoc.data;
                 const userId = userDoc.id;
 
                 if (!user.email) { skipped.noEmail++; continue; }
@@ -2735,19 +3212,16 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
 
                 if (result.success) {
                     sent++;
-                    // Batch log writes — flush every 400 to stay under Firestore limits
-                    const logRef = db.collection('email_logs').doc(`${postId}_${userId}`);
-                    logBatch.set(logRef, { postId, userId, sentAt: new Date().toISOString() });
-                    batchCount++;
-                    if (batchCount >= 400) {
-                        // A failed log flush must not abort the whole run — the
-                        // emails already went out; worst case a few users get a
-                        // duplicate on the next post.
-                        try { await logBatch.commit(); } catch (e) {
-                            flushErrorCount++;
-                            console.error('Log batch flush error:', e.message);
-                        }
-                        batchCount = 0;
+                    const sentAt = new Date().toISOString();
+                    if (isD1Configured()) {
+                        logRows.push({ post_id: String(postId), user_id: String(userId), sent_at: sentAt });
+                        // D1 par bhi batch — 400 rows ek dafa
+                        if (logRows.length >= 400) await flushLogs(true);
+                    } else if (logBatch) {
+                        // Batch log writes — flush every 400 to stay under Firestore limits
+                        logBatch.set(db.collection('email_logs').doc(`${postId}_${userId}`), { postId, userId, sentAt });
+                        batchCount++;
+                        if (batchCount >= 400) await flushLogs(true);
                     }
                 } else {
                     skipped.sendFailed++;
@@ -2755,19 +3229,17 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
             }
 
             // Flush remaining logs
-            if (batchCount > 0) {
-                try { await logBatch.commit(); } catch(e) {
-                    flushErrorCount++;
-                    console.error('Log batch flush error:', e.message);
-                }
-            }
+            // A failed log flush must not abort the whole run — the emails already
+            // went out; worst case a few users get a duplicate on the next post.
+            await flushLogs(true);
 
             console.log(`[new-post] sent=${sent} skipped=${JSON.stringify(skipped)} logFlushErrors=${flushErrorCount}`);
             return res.json({
                 success: true,
                 sent,
                 skipped,
-                fetched: usersSnap.size,
+                fetched: userDocs.length,
+                source: d1Post ? (postDoc._docId ? 'd1' : 'firestore') : (db ? 'firestore' : 'none'),
                 message: `${sent} users notified.`
             });
         }
@@ -2818,6 +3290,143 @@ app.post('/api/send-notification', rateLimit, requireAuth, async (req, res) => {
 });
 
 // ============================================
+// D1 POSTS API — site pages (employer.html / candidate.html / simple.html)
+// ============================================
+//  GET  /api/post?slug=<slug|id>   → { success, post }        (homepage cards ke liye)
+//  POST /api/job-alert             → { success, sent, ... }    (post publish hone par sab
+//                                     matched users ko — client ko 1500 keys nahi chahiye)
+//  POST /api/post-close            → { success, ok }           (expiry / unpublish — purge)
+//
+// ⚠️ SAB ROUTES AUTH KE BINA NAHI CHALTE — ya Firebase ID token (browser) ya
+//    x-notify-secret header (worker-to-worker). Post likhne/edit karne wala koi
+//    route nahi hai — woh kaam site worker (/api/posts, /api/admin/post-*) karta hai.
+// ============================================
+
+// Auth: EITHER Firebase ID token (browser) OR x-notify-secret (worker-to-worker).
+async function requireCaller(req) {
+    if (notifySecretOk(req)) return { uid: 'notify-secret', email: '', isService: true };
+    return requireFirebaseUser(req);
+}
+
+// GET /api/post?slug=12345   — post ka data (D1 se)
+async function handleGetPost(req, res) {
+    const who = await requireCaller(req);
+    if (!who) return res.status(401).json({ success: false, error: 'Sign in required' });
+    const slug = String((req.query && (req.query.slug || req.query.id)) || '').trim().slice(0, 140);
+    if (!slug) return res.status(400).json({ success: false, error: 'slug required' });
+    if (!isD1Configured()) return res.status(503).json({ success: false, error: 'D1 not configured' });
+    try {
+        const post = await d1PostBySlug(slug);
+        if (!post) return res.status(404).json({ success: false, error: 'Post not found' });
+        // Internals client ko na bhejein
+        ['_editedKeys', '_synced', '_notified'].forEach(k => delete post[k]);
+        return res.json({ success: true, post });
+    } catch (e) {
+        console.error('[post] read failed:', e.message);
+        return res.status(500).json({ success: false, error: 'Could not read post' });
+    }
+}
+
+// POST /api/job-alert  { postId, link? }
+// Internally /api/send-notification (type=new-post) ko call karta hai —
+// wohi matching / opt-in / already-sent logic, magar ab post ka data D1 se
+// aata hai aur sender khud matched users ko dhoondta hai.
+async function handleJobAlert(req, res) {
+    const who = await requireCaller(req);
+    console.log('[job-alert] caller:', who ? (who.isService ? 'service(secret)' : 'user:' + who.uid) : 'REJECTED', '| header:', req.headers['x-notify-secret'] ? 'x-notify-secret-present' : 'none');
+    if (!who) return res.status(401).json({ success: false, error: 'Sign in required' });
+    const body = req.body || {};
+    const postId = String(body.postId || body.slug || body.id || '').trim().slice(0, 140);
+    if (!postId) return res.status(400).json({ success: false, error: 'postId required' });
+    try {
+        const r = await fetch(SELF_URL + '/api/send-notification', {
+            method: 'POST',
+            headers: Object.assign(
+                { 'Content-Type': 'application/json' },
+                // Browser se aaya token aage bhejo; worker-to-worker case mein
+                // shared secret hi identity hai (is liye NOTIFY_SECRET bhi).
+                req.headers['authorization'] ? { 'Authorization': req.headers['authorization'] } : {},
+                NOTIFY_SHARED_SECRET ? { 'x-notify-secret': NOTIFY_SHARED_SECRET } : {},
+                process.env.INTERNAL_SECRET ? { 'x-internal-secret': process.env.INTERNAL_SECRET } : {}
+            ),
+            body: JSON.stringify({
+                type: 'new-post',
+                postId,
+                link: body.link ? String(body.link).slice(0, 600) : undefined
+            })
+        });
+        const out = await r.json().catch(() => ({}));
+        return res.status(r.status).json(out);
+    } catch (e) {
+        console.error('[job-alert] failed:', e.message);
+        return res.status(502).json({ success: false, error: 'Alert service unreachable' });
+    }
+}
+
+// POST /api/post-close  { slug | postId, reason? }
+// Post close/expire: agar D1 mein hai to data par isExpired=true likh do (page
+// expire badge dikha dega). Edge page cache site worker ke apne routes saaf
+// karte hain — woh isi worker ke paas hain, is route ke paas nahi.
+async function handlePostClose(req, res) {
+    const who = await requireCaller(req);
+    if (!who) return res.status(401).json({ success: false, error: 'Sign in required' });
+    const body = req.body || {};
+    const slug = String(body.slug || body.postId || body.id || '').trim().slice(0, 140);
+    if (!slug) return res.status(400).json({ success: false, error: 'slug required' });
+    if (!isD1Configured()) return res.status(503).json({ success: false, error: 'D1 not configured' });
+    try {
+        const post = await d1PostBySlug(slug);
+        if (!post) return res.status(404).json({ success: false, error: 'Post not found' });
+        // Sirf malik ya admin yahan band kar sakta hai
+        const isOwner = post.posterId && post.posterId === who.uid;
+        if (!isOwner && !req.isAdmin) return res.status(403).json({ success: false, error: 'Only the post owner can close it' });
+        await d1PatchPost(post._docId, {
+            isExpired: true,
+            isScheduled: false,
+            expiredAt: new Date().toISOString(),
+            expiryReason: String(body.reason || 'manual').slice(0, 40)
+        });
+        return res.json({ success: true, ok: true, slug: post.slug });
+    } catch (e) {
+        console.error('[post-close] failed:', e.message);
+        return res.status(500).json({ success: false, error: 'Could not close post' });
+    }
+}
+
+app.get('/api/post', handleGetPost);
+app.post('/api/post', rateLimit, handleJobAlert);      // purane client ke liye shorcut (postId)
+app.post('/api/job-alert', rateLimit, handleJobAlert);
+app.post('/api/post-alert', rateLimit, handleJobAlert); // alias
+app.post('/api/post-close', rateLimit, handlePostClose);
+
+// GET /api/d1-health — D1 connection + zaroori tables check (secret nahi dungta)
+app.get('/api/d1-health', async (req, res) => {
+    const info = {
+        configured: isD1Configured(),
+        accountIdSet: !!D1_ACCOUNT_ID,
+        databaseIdSet: !!D1_DATABASE_ID,
+        tokenSet: !!D1_API_TOKEN,
+        binding: D1_BINDING,
+        disabled: !USE_D1
+    };
+    if (!isD1Configured()) return res.json({ success: true, ...info });
+    try {
+        const rows = await d1Query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('posts','fs_docs','post_emails','expiry_alerts')"
+        );
+        info.tables = rows.map(r => r.name);
+        try {
+            const c = await d1Query('SELECT COUNT(*) AS n FROM posts');
+            info.posts = (c[0] && Number(c[0].n)) || 0;
+        } catch (e) { info.postsError = e.message; }
+        return res.json({ success: true, ...info });
+    } catch (e) {
+        info.error = e.message;
+        return res.status(500).json({ success: false, ...info });
+    }
+});
+
+// ============================================
 // DIAGNOSTIC: GET /api/email-health
 // Reports whether Brevo is configured and how far the request chain gets.
 // Does not print secrets — only whether each env var is present.
@@ -2832,6 +3441,11 @@ app.get('/api/email-health', async (req, res) => {
         firebase: {
             initialized: !!db,
             databaseURL: admin.apps.length ? (admin.apps[0].options.databaseURL || null) : null,
+        },
+        d1: {
+            configured: isD1Configured(),
+            binding: D1_BINDING,
+            primaryFor: 'new-post + expiry-warning'
         },
     };
 
@@ -2862,10 +3476,36 @@ app.get('/api/email-health', async (req, res) => {
 // ============================================
 // EXPIRY WARNING (Auto Cron)
 // ============================================
+// Data (kaun si posts 24 ghante mein expire ho rahi hain) ab D1 se aata hai.
+// Pehle har cron run POORA `posts` collection Firestore se padhta tha — jab
+// site D1-first ho gayi hai aur posts ka asal record post → D1 hai, to expiry
+// window bhi wahin se lena chahiye (aur quota bhi bachta hai).
+//
+// Alerts ka bhejne ka hisaab D1 mein `expiry_alerts` table main rakha jata hai
+// (ek post par ek hi dafa), taake cron dobara chale to duplicate email na jaye.
+// Firestore fallback waisa hi hai jaisa pehle tha.
+const EXPIRY_LIMIT = 200;
+
+async function expiryAlreadyWarnedD1(ids) {
+    const list = Array.from(new Set((ids || []).filter(Boolean)));
+    if (!list.length) return new Set();
+    const marks = list.map((_, i) => '?' + (i + 1)).join(', ');
+    await ensureD1Table('expiry_alerts');
+    const rows = await d1Query('SELECT post_id FROM expiry_alerts WHERE post_id IN (' + marks + ')', list);
+    return new Set(rows.map(r => String(r.post_id)));
+}
+async function markExpiryWarnedD1(postId, email) {
+    await d1Query(
+        'INSERT OR REPLACE INTO expiry_alerts (post_id, sent_at, email) VALUES (?1, ?2, ?3)',
+        [String(postId), Date.now(), String(email || '').slice(0, 320)]
+    );
+}
+
 app.get('/api/expiry-warning', async (req, res) => {
-    if (!db) {
-        console.error('[expiry] Firestore not initialized — check FIREBASE_SERVICE_ACCOUNT');
-        return res.status(503).json({ success: false, error: 'Database not available (Firebase not initialized)' });
+    const useD1 = isD1Configured();
+    if (!useD1 && !db) {
+        console.error('[expiry] neither D1 nor Firestore is configured');
+        return res.status(503).json({ success: false, error: 'Database not available (D1/Firebase not configured)' });
     }
     try {
         const now = new Date();
@@ -2873,45 +3513,65 @@ app.get('/api/expiry-warning', async (req, res) => {
         const nowIso = now.toISOString();
         const in24hIso = in24h.toISOString();
 
-        // QUOTA FIX: only fetch posts that can actually expire in the next 24h.
-        // The old `collection('posts').get()` read EVERY post on EVERY run,
-        // which blew through the daily Firestore read quota (RESOURCE_EXHAUSTED).
-        // Two server-side filters (expiresAt window + not-yet-warned) plus a hard
-        // limit keep this at a handful of reads per run instead of thousands.
-        // NOTE: posts.expiresAt must be stored as an ISO-8601 string for this range
-        // query to work (which is what the write path already does).
-        let duePosts;
-        try {
-            duePosts = await db.collection('posts')
-                .where('expiresAt', '>', nowIso)
-                .where('expiresAt', '<=', in24hIso)
-                .where('expiryEmailSent', '==', false)
-                .limit(200)
-                .get();
-        } catch (queryErr) {
-            // If the composite index is missing Firestore throws FAILED_PRECONDITION
-            // and prints the exact index-creation URL. Fall back to the cheap
-            // expiresAt-only query so the cron still runs until the index is built.
-            console.error('[expiry] filtered query failed (' + queryErr.code + '):', queryErr.message);
-            console.error('[expiry] falling back to expiresAt-only query — create the suggested index to fix this.');
-            duePosts = await db.collection('posts')
-                .where('expiresAt', '>', nowIso)
-                .where('expiresAt', '<=', in24hIso)
-                .limit(200)
-                .get();
+        // ── 1) Kaun si posts expire ho rahi hain ───────────────
+        // D1: ek hi SQL query (json_extract) — koi index/cron ka intezar nahi.
+        let due = [];   // [{ id, post, source }]
+        let d1Warned = new Set();
+        let expireD1Failed = false;
+        if (useD1) {
+            try {
+                await ensureD1Table('expiry_alerts');
+                const raw = await d1ExpiringPosts(nowIso, in24hIso, EXPIRY_LIMIT);
+                d1Warned = await expiryAlreadyWarnedD1(raw.map(r => r.id));
+                due = raw
+                    .filter(r => !d1Warned.has(String(r.id)))
+                    .map(r => ({ id: r.id, post: r.post, source: 'd1' }));
+                console.log(`[expiry] D1: ${raw.length} due, ${due.length} not yet warned`);
+            } catch (e) {
+                console.error('[expiry] D1 query failed, Firestore par ja rahe hain:', e.message);
+                due = [];
+                expireD1Failed = true;
+            }
         }
 
-        if (duePosts.empty) {
+        // Firestore fallback: D1 na ho, ya D1 ki query fail ho jaye.
+        let usedFirestore = false;
+        if (!useD1 || expireD1Failed) {
+            if (!db) return res.status(503).json({ success: false, error: 'D1 query failed and Firestore is not configured' });
+            usedFirestore = true;
+            let duePosts;
+            try {
+                duePosts = await db.collection('posts')
+                    .where('expiresAt', '>', nowIso)
+                    .where('expiresAt', '<=', in24hIso)
+                    .where('expiryEmailSent', '==', false)
+                    .limit(EXPIRY_LIMIT)
+                    .get();
+            } catch (queryErr) {
+                // Composite index missing → FAILED_PRECONDITION; cheap query par fallback.
+                console.error('[expiry] filtered query failed (' + queryErr.code + '):', queryErr.message);
+                duePosts = await db.collection('posts')
+                    .where('expiresAt', '>', nowIso)
+                    .where('expiresAt', '<=', in24hIso)
+                    .limit(EXPIRY_LIMIT)
+                    .get();
+            }
+            due = duePosts.docs
+                .filter(d => !(d.data() || {}).expiryEmailSent)
+                .map(d => ({ id: d.id, post: d.data() || {}, source: 'firestore' }));
+        }
+
+        if (!due.length) {
             console.log('[expiry] no posts expiring in the next 24h');
-            return res.json({ success: true, message: 'No posts expiring soon.', warned: 0 });
+            return res.json({ success: true, message: 'No posts expiring soon.', warned: 0, due: 0, source: usedFirestore ? 'firestore' : 'd1' });
         }
 
         let warned = 0;
-        for (const doc of duePosts.docs) {
-            const post = doc.data();
-            const postId = doc.id;
+        for (const item of due) {
+            const post = item.post;
+            const postId = item.id;
 
-            if (!post.expiresAt || post.expiryEmailSent === true) continue;
+            if (!post.expiresAt) continue;
 
             const expiryTime = new Date(post.expiresAt).getTime();
             if (isNaN(expiryTime)) {
@@ -2920,33 +3580,35 @@ app.get('/api/expiry-warning', async (req, res) => {
             }
             if (expiryTime <= now.getTime() || expiryTime > in24h.getTime()) continue;
 
-            // Fetch poster info — check all possible name fields
-            let posterEmail = null;
-            let posterName = 'User';
-
+            // ── 2) Poster ka email/naam ────────────────────────
+            // D1 posts se naam (Firestore read save), email users doc / Firebase Auth se.
+            let posterEmail = post.email || post.posterEmail || null;
+            let posterName = post.posterName || post.name || '';
             const posterIdField = post.posterId || post.userId || post.uid || null;
-            console.log(`Post ${postId}: posterIdField =`, posterIdField);
 
             if (posterIdField) {
-                try {
-                    const userDoc = await db.collection('users').doc(posterIdField).get();
-                    if (userDoc.exists) {
-                        const userData = userDoc.data();
-                        posterEmail = userData.email || null;
-                        posterName = userData.fullName || userData.facilityName || userData.name || userData.displayName || 'User';
-                        console.log(`Post ${postId}: posterEmail = ${posterEmail}, posterName = ${posterName}`);
-                    } else {
-                        console.log(`Post ${postId}: user doc not found for id:`, posterIdField);
-                    }
-                } catch (e) {
-                    console.error(`Post ${postId}: user fetch error:`, e.message);
+                if (useD1) {
+                    try {
+                        const m = await d1UsersByUid([posterIdField]);
+                        if (m[posterIdField] && m[posterIdField].name) posterName = m[posterIdField].name;
+                    } catch (e) { console.error(`Post ${postId}: D1 poster lookup failed:`, e.message); }
                 }
-            } else {
-                // posterId missing — try using email directly on the post doc
-                posterEmail = post.email || post.posterEmail || null;
-                posterName = post.posterName || post.name || 'User';
-                console.log(`Post ${postId}: no posterId, using post-level email:`, posterEmail);
+                if (db) {
+                    try {
+                        const userDoc = await db.collection('users').doc(posterIdField).get();
+                        if (userDoc.exists) {
+                            const userData = userDoc.data();
+                            posterEmail = userData.email || posterEmail;
+                            posterName = userData.fullName || userData.facilityName || userData.name || userData.displayName || posterName;
+                        }
+                    } catch (e) {
+                        console.error(`Post ${postId}: user fetch error:`, e.message);
+                    }
+                }
+                // Firestore na ho / doc na mile → Firebase Auth ka email (index / quota nahi lagti)
+                if (!posterEmail) posterEmail = await firebaseAuthEmail(posterIdField);
             }
+            posterName = posterName || 'User';
 
             if (!posterEmail) {
                 console.log(`Post ${postId}: skipped — no email found`);
@@ -2970,7 +3632,17 @@ app.get('/api/expiry-warning', async (req, res) => {
             });
 
             if (result.success) {
-                await db.collection('posts').doc(postId).update({ expiryEmailSent: true });
+                // Jo ho sake mark karo — na ho to agli run dobara bhejegi
+                // (duplicate se behtar hai warning chhoot na jaye).
+                try {
+                    if (useD1 && item.source === 'd1') {
+                        await markExpiryWarnedD1(postId, posterEmail);
+                    } else if (db) {
+                        await db.collection('posts').doc(postId).update({ expiryEmailSent: true });
+                    }
+                } catch (e) {
+                    console.error(`Post ${postId}: warn-mark failed:`, e.message);
+                }
                 warned++;
                 console.log(`Post ${postId}: expiry warning sent to ${posterEmail}`);
             } else {
@@ -2979,7 +3651,7 @@ app.get('/api/expiry-warning', async (req, res) => {
         }
 
         console.log(`Warnings sent: ${warned}`);
-        return res.json({ success: true, warned, message: `${warned} warnings sent.` });
+        return res.json({ success: true, warned, due: due.length, source: usedFirestore ? 'firestore' : 'd1', message: `${warned} warnings sent.` });
 
     } catch (err) {
         console.error('Expiry Error:', err);
@@ -3150,6 +3822,13 @@ app.get('/', (req, res) => {
         service: 'Health Jobs Mail Server',
         version: '12.0.0',
         endpoint: 'POST /api/send-notification',
+        d1: isD1Configured() ? 'enabled (posts primary)' : 'disabled (Firestore fallback)',
+        postsApi: {
+            read:     'GET /api/post?slug=...',
+            jobAlert: 'POST /api/job-alert { postId }',
+            postClose:'POST /api/post-close { slug }',
+            health:   'GET /api/d1-health'
+        },
         types: [
             'password-reset', 'welcome', 'employer-approved', 'employer-rejected',
             'appeal-submitted', 'appeal-approved', 'appeal-rejected',
@@ -3165,7 +3844,7 @@ app.get('/', (req, res) => {
         },
         emailConfigured: isEmailConfigured(),
         adminEmail: ADMIN_EMAIL,
-        cron: 'GET /api/expiry-warning',
+        cron: 'GET /api/expiry-warning (posts: D1 first)',
         health: 'GET /api/email-health',
         resetLink: 'POST /api/send-reset-link'
     });
@@ -3183,6 +3862,13 @@ if (!isEmailConfigured()) {
 }
 if (!db) {
     console.error('[startup] WARNING: Firestore is NOT initialized. Check FIREBASE_SERVICE_ACCOUNT.');
+}
+if (isD1Configured()) {
+    console.log('[startup] D1 posts source ON — job alerts + expiry cron D1 se chalenge.');
+} else if (!db) {
+    console.error('[startup] ERROR: neither D1 (CLOUDFLARE_ACCOUNT_ID/D1_DATABASE_ID/CLOUDFLARE_D1_TOKEN) nor Firestore is configured.');
+} else {
+    console.log('[startup] D1 not configured — posts Firestore se (purana tareeqa).');
 }
 console.log('[startup] admin alerts go to:', [ADMIN_EMAIL, ...ADMIN_EMAILS_EXTRA].join(', '));
 
